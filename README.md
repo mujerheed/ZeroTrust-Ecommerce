@@ -1,1 +1,1 @@
-# ZeroTrust-Ecommerce
+# Zero Trust E-commerce Project
