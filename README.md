@@ -1,4 +1,5 @@
 # TrustGuard: Zero Trust E-commerce System 
+---
 
 ## 🛡️ Project Overview
 This repository contains the implementation of TrustGuard, a state-of-the-art Zero Trust Security System designed to secure informal e-commerce transactions conducted over social media platforms (primarily WhatsApp and Instagram) in Nigeria. The system directly addresses critical security gaps in current workflows, ensuring that no user (buyer, vendor, or administrator) is implicitly trusted.
@@ -40,3 +41,4 @@ This repository contains the implementation of TrustGuard, a state-of-the-art Ze
 | frontend/ | **User Interfaces**: React components for the Vendor and CEO Dashboards. | src/App.jsx, src/components/VendorDashboard.jsx |
 | infrastructure/ | **AWS IaC**: Definitions for all cloud resources required for deployment. | trustguard-template.yaml (SAM/CloudFormation), samconfig.toml |
 | docs/ | **Project Documentation**: Reports, security analyses, and architectural diagrams. | PHASE_1_PLAN.md, SECURITY_MODEL.md |
+
