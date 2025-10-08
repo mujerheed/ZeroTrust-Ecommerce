@@ -3,3 +3,6 @@ boto3==1.34.116
 
 #Optional: pydantic for structured data validation (good for security)
 pydantic==2.7.1
+
+#Logging library for structured logs (helps with audit trails)
+pyjwt==2.8.0
