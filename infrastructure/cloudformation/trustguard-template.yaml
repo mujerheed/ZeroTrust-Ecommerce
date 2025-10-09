@@ -17,6 +17,8 @@ Globals:
         USERS_TABLE: !Ref TrustGuardUsersTable
         OTPS_TABLE: !Ref TrustGuardOTPsTable
         AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
+        ORDERS_TABLE: !Ref TrustGuardOrdersTable
+        RECEIPTS_TABLE: !Ref TrustGuardReceiptsTable
         RECEIPT_BUCKET: !Ref TrustGuardReceiptBucket
         JWT_SECRET: "temporary-dev-secret-key-change-later"  # Hardcoded
 
@@ -99,6 +101,86 @@ Resources:
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
+    
+  # Stores order data (transactions, statuses)
+  TrustGuardOrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TrustGuard-Orders
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: vendor_id
+          AttributeType: S
+        - AttributeName: buyer_id
+          AttributeType: S
+        - AttributeName: order_status
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: N
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        # GSI for vendor to query their assigned orders
+        - IndexName: VendorIndex
+          KeySchema:
+            - AttributeName: vendor_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # GSI for vendor to query orders by status
+        - IndexName: VendorStatusIndex
+          KeySchema:
+            - AttributeName: vendor_id
+              KeyType: HASH
+            - AttributeName: order_status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # GSI for buyer orders (for future buyer portal)
+        - IndexName: BuyerIndex
+          KeySchema:
+            - AttributeName: buyer_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+    
+  # Stores receipt metadata (links to S3 objects, associated orders)
+  TrustGuardReceiptsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TrustGuard-Receipts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: uploaded_at
+          AttributeType: N
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        # GSI to query receipts by upload timestamp
+        - IndexName: UploadTimeIndex
+          KeySchema:
+            - AttributeName: uploaded_at
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
 
   # 2. S3 Bucket (Secure Receipt Storage)
 
@@ -178,7 +260,14 @@ Resources:
             Action:
               - dynamodb:GetItem
               - dynamodb:Query
-            Resource: !GetAtt TrustGuardUsersTable.Arn
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+            Resource: 
+              - !GetAtt TrustGuardUsersTable.Arn
+              - !GetAtt TrustGuardOrdersTable.Arn
+              - !GetAtt TrustGuardReceiptsTable.Arn
+              - !Sub "${TrustGuardOrdersTable.Arn}/index/*"     # For GSI access
+              - !Sub "${TrustGuardReceiptsTable.Arn}/index/*"   # For GSI access
         # Write-only access to Audit Logs table
         - Statement:
             Effect: Allow
