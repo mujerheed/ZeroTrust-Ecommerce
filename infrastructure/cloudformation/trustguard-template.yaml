@@ -118,7 +118,7 @@ Resources:
   AuthServiceLambda:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../backend/
+      CodeUri: ../../backend/
       Description: Core service for OTP generation and verification.
       # CRITICAL: Least Privilege IAM Policies
       Policies:
@@ -145,7 +145,7 @@ Resources:
   ReceiptServiceLambda:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../backend/
+      CodeUri: ../../backend/
       Description: Manages secure S3 uploads and receipt access permissions.
       Policies:
         # Read/Write access to the Receipt Bucket
@@ -168,8 +168,8 @@ Resources:
   VendorServiceLambda:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../backend/
-      Description: Service for Vendor and CEO dashboard data access.
+      CodeUri: ../../backend/
+      Description: Service for Vendor dashboard data access.
       Policies:
         # Read access to Users table
         - Statement:
@@ -189,6 +189,33 @@ Resources:
           Type: Api
           Properties:
             Path: /vendor
+            Method: ANY
+
+# Handles CEO-specific dashboard and admin actions (vendor management, approvals, audit logs)
+  CEOServiceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../backend/
+      Description: Service for CEO dashboard and escalated transaction approvals.
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TrustGuardUsersTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:Query
+            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+      Events:
+        ApiCEO:
+          Type: Api
+          Properties:
+            Path: /ceo
             Method: ANY
 
 # ------------------------------------------------------------
