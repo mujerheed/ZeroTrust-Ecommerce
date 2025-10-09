@@ -12,3 +12,6 @@ fastapi
 
 #ASGI adapter for AWS Lambda
 mangum
+
+#Testing framework (optional, but useful for development)
+pytest
