@@ -1,41 +1,16 @@
-import json
-from auth_service import lambda_handler as auth_handler
+from fastapi import FastAPI
+from mangum import Mangum
 
-def lambda_handler(event, context):
-    """
-    Central router for all API Gateway requests.
-    Routes requests based on the path prefix to the appropriate service handler.
-    """
-    
-    # Enable CORS for development/testing
-    headers = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'OPTIONS,POST,GET,PUT,DELETE'
-    }
+app = FastAPI()
 
-    # Handle OPTIONS pre-flight request for CORS
-    if event.get('httpMethod') == 'OPTIONS':
-        return {
-            'statusCode': 200,
-            'headers': headers,
-            'body': ''
-        }
-    
-    path = event.get('path', '')
+# Import routers from modules (auth, vendor, ceo)
+from auth_service.auth_routes import router as auth_router
+from vendor_service.vendor_routes import router as vendor_router
+from ceo_service.ceo_routes import router as ceo_router
 
-    # Route to AuthServiceLambda
-    if path.startswith('/auth'):
-        # Pass the full event/context to the specific service handler
-        response = auth_handler(event, context)
-        # Add CORS headers to the service response
-        response['headers'] = {**response.get('headers', {}), **headers}
-        return response
-    
-    # TODO: Add routing for /receipt and /vendor paths later
+# Include routers with prefixes
+app.include_router(auth_router, prefix="/auth")
+app.include_router(vendor_router, prefix="/vendor")
+app.include_router(ceo_router, prefix="/ceo")
 
-    return {
-        'statusCode': 404,
-        'headers': headers,
-        'body': json.dumps({'message': 'Service not found.'})
-    }
+handler = Mangum(app) # For AWS Lambda compatibility

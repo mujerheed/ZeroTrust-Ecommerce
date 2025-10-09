@@ -1,8 +1,14 @@
 #Core AWS SDK for Python (required for all Lambda functions)
-boto3==1.34.116
+boto3
 
 #Optional: pydantic for structured data validation (good for security)
-pydantic==2.7.1
+pydantic
 
 #Logging library for structured logs (helps with audit trails)
-pyjwt==2.8.0
+pyjwt
+
+#Web framework for building APIs
+fastapi
+
+#ASGI adapter for AWS Lambda
+mangum
