@@ -18,6 +18,7 @@ Globals:
         OTPS_TABLE: !Ref TrustGuardOTPsTable
         AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
         RECEIPT_BUCKET: !Ref TrustGuardReceiptBucket
+        JWT_SECRET: "temporary-dev-secret-key-change-later"  # Hardcoded
 
 # ------------------------------------------------------------
 # Parameters: Allow configuration during deployment
