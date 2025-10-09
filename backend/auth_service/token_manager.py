@@ -1,21 +1,31 @@
+"""
+JWT creation and decoding.
+"""
+
+import os
 import jwt
 from datetime import datetime, timedelta
 
-SECRET_KEY = "change_this_to_secret_key"
+SECRET_KEY = os.getenv("JWT_SECRET", "temporary_dev_secret")
+ALGORITHM  = "HS256"
 
-def create_jwt(user_id, expires_minutes=30):
+def create_jwt(user_id: str, role: str, expires_minutes: int = 30) -> str:
+    """
+    Generate a signed JWT for the authenticated user.
+    """
     payload = {
         "sub": user_id,
-        "exp": datetime.utcnow() + timedelta(minutes=expires_minutes),
+        "role": role,
+        "exp": datetime.utcnow() + timedelta(minutes=expires_minutes)
     }
-    token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-    return token
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-def decode_jwt(token):
+def decode_jwt(token: str) -> str:
+    """
+    Decode and validate a JWT, returning the user_id.
+    """
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        return payload["sub"]
-    except jwt.ExpiredSignatureError:
-        return None
-    except jwt.InvalidTokenError:
+        data = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return data["sub"]
+    except jwt.PyJWTError:
         return None

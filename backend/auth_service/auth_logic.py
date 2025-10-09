@@ -1,21 +1,34 @@
-from otp_manager import generate_otp, send_otp, validate_otp
+"""
+Authentication business logic.
+"""
+from time import time
+from database import get_user
+from otp_manager import request_otp, verify_otp
+from token_manager import create_jwt
 
-_users_db = {}  # Dummy placeholder for actual DB calls
+def register_user(email: str, phone: str, name: str) -> str:
+    """
+    (Optional) Implement user creation in USERS_TABLE.
+    """
+    # TODO: add to DynamoDB users table
+    user_id = f"user_{int(time.time())}"
+    return user_id  # return the new user_id
 
-def register_user(email, phone, name):
-    # Simulate unique user_id creation and persist user info
-    user_id = f"user-{len(_users_db) + 1}"
-    _users_db[user_id] = {"email": email, "phone": phone, "name": name}
-    return user_id
-
-def login_user(user_id):
-    # Generate and send OTP
-    if user_id not in _users_db:
+def login_user(user_id: str) -> bool:
+    """
+    Initiate OTP process for login.
+    """
+    user = get_user(user_id)
+    if not user:
         raise Exception("User not found")
-    otp = generate_otp(user_id)
-    send_otp(_users_db[user_id]["phone"], otp)
-    return True
+    contact = user.get("contact") or user.get("email")
+    return request_otp(user_id, user.get("role", "Buyer"), contact)
 
-def verify_otp(user_id, otp):
-    # Validate OTP correctness
-    return validate_otp(user_id, otp)
+def verify_otp_code(user_id: str, otp: str) -> str:
+    """
+    Verify OTP and return a JWT if successful.
+    """
+    result = verify_otp(user_id, otp)
+    if not result.get("valid"):
+        raise Exception("Invalid or expired OTP")
+    return create_jwt(user_id, result["role"])

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, EmailStr
-from typing import Optional
-from auth_logic import register_user, login_user, verify_otp
+from auth_logic import register_user, login_user, verify_otp_code
+from utils import format_response, validate_email, validate_phone_number, validate_user_name
 
 router = APIRouter()
 
@@ -11,35 +11,32 @@ class RegisterRequest(BaseModel):
     name: str
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(request: RegisterRequest):
-    try:
-        user_id = register_user(request.email, request.phone, request.name)
-        return {"message": "User registered successfully", "user_id": user_id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+def register(req: RegisterRequest):
+    validate_email(req.email)
+    validate_phone_number(req.phone)
+    validate_user_name(req.name)
+    user_id = register_user(req.email, req.phone, req.name)
+    return format_response("success", "User registered", {"user_id": user_id})
 
 class LoginRequest(BaseModel):
     user_id: str
 
 @router.post("/login")
-async def login(request: LoginRequest):
+def login(req: LoginRequest):
     try:
-        otp_sent = login_user(request.user_id)
-        return {"message": "OTP sent", "otp_sent": otp_sent}
+        login_user(req.user_id)
+        return format_response("success", "OTP sent")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-class OTPVerifyRequest(BaseModel):
+class VerifyRequest(BaseModel):
     user_id: str
     otp: str
 
 @router.post("/verify-otp")
-async def verify_otp_route(request: OTPVerifyRequest):
+def verify(req: VerifyRequest):
     try:
-        verified = verify_otp(request.user_id, request.otp)
-        if verified:
-            return {"message": "OTP verified successfully"}
-        else:
-            raise HTTPException(status_code=401, detail="Invalid OTP or expired")
+        token = verify_otp_code(req.user_id, req.otp)
+        return format_response("success", "OTP verified", {"token": token})
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=401, detail=str(e))

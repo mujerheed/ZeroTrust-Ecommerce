@@ -15,3 +15,6 @@ mangum
 
 #Testing framework (optional, but useful for development)
 pytest
+
+#Library to load environment variables from .env file (for local development)
+python-dotenv

@@ -1,5 +1,11 @@
+import os
 from fastapi import FastAPI
 from mangum import Mangum
+from dotenv import load_dotenv
+
+# Load .env file only in local development
+if os.getenv('AWS_LAMBDA_FUNCTION_NAME') is None:
+    load_dotenv()
 
 app = FastAPI()
 
