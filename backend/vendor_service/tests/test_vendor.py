@@ -1,6 +1,6 @@
 import pytest
-from .vendor_logic import place_order, upload_receipt, confirm_payment
-from .database import _orders, _receipts
+from vendor_service.vendor_logic import place_order, upload_receipt, confirm_payment
+from vendor_service.database import _orders, _receipts
 
 def test_place_order():
     order = place_order("vendor1", "order-1", 100.0)
