@@ -36,9 +36,95 @@ This repository contains the implementation of TrustGuard, a state-of-the-art Ze
 
 ## 📁 Project Structure
 | Directory | Purpose | Key Files |
-|-----------|---------|-----------|
-| backend/ | **Core Business Logic**: Python code for Lambda functions, handling API requests, and data access. | requirements.txt, app.py (Lambda handler), auth_service.py |
-| frontend/ | **User Interfaces**: React components for the Vendor and CEO Dashboards. | src/App.jsx, src/components/VendorDashboard.jsx |
-| infrastructure/ | **AWS IaC**: Definitions for all cloud resources required for deployment. | trustguard-template.yaml (SAM/CloudFormation), samconfig.toml |
-| docs/ | **Project Documentation**: Reports, security analyses, and architectural diagrams. | PHASE_1_PLAN.md, SECURITY_MODEL.md |
+ZeroTrust-Ecommerce/
+│
+├── backend/                              # Backend logic root
+│   ├── app.py                          # Central router (entry point)
+│   ├── requirements.txt                # Python dependencies
+│   ├── README.md                      # Backend project overview and setup
+│
+│   ├── auth_service/                   # Module 1 - Authentication & OTP
+│   │   ├── __init__.py
+│   │   ├── auth_routes.py              # API endpoints (/auth/register, /login, /verify-otp)
+│   │   ├── auth_logic.py               # Core auth logic
+│   │   ├── otp_manager.py              # OTP generation, sending, verification
+│   │   ├── token_manager.py            # JWT handling
+│   │   ├── database.py                 # Auth data persistence
+│   │   ├── utils.py                    # Helper utilities (formatting, validators)
+│   │   └── tests/
+│   │       └── test_auth.py            # Unit tests
+│
+│   ├── ceo_service/                    # Module 2 - CEO Dashboard & Admin Controls
+│   │   ├── __init__.py
+│   │   ├── ceo_routes.py               # API endpoints for CEO
+│   │   ├── ceo_logic.py                # CEO business logic
+│   │   ├── vendor_manager.py           # Manage vendor accounts
+│   │   ├── audit_log_manager.py        # Audit log handling
+│   │   ├── approval_manager.py         # Transaction approvals, escalation
+│   │   ├── database.py                 # CEO data persistence
+│   │   ├── utils.py                    # Helper utilities
+│   │   └── tests/
+│   │       ├── test_ceo.py
+│   │       ├── test_approval.py
+│   │       └── test_audit_log.py
+│
+│   ├── vendor_service/                 # Module 3 - Vendor Dashboard & Transactions
+│   │   ├── __init__.py
+│   │   ├── vendor_routes.py            # Vendor API endpoints
+│   │   ├── vendor_logic.py             # Vendor business logic
+│   │   ├── transaction_manager.py     # Transaction handling & OTP validation
+│   │   ├── database.py                 # Vendor data persistence
+│   │   ├── utils.py                    # Helper utilities
+│   │   └── tests/
+│   │       └── test_vendor.py
+│
+│   ├── integrations/                  # External integrations and webhook handlers
+│   │   ├── __init__.py
+│   │   ├── whatsapp_api.py             # WhatsApp Business API integration
+│   │   ├── instagram_api.py            # Instagram Messaging API integration
+│   │   ├── sms_gateway.py              # SMS gateway (fallback)
+│   │   └── webhook_handler.py          # Incoming message webhook handler
+│
+│   ├── common/                       # Shared utilities and configurations
+│   │   ├── __init__.py
+│   │   ├── db_connection.py           # DB setup/config
+│   │   ├── config.py                  # Environment/configuration constants
+│   │   ├── logger.py                  # Central logging facility
+│   │   └── security.py                # Encryption, hashing, etc.
+│
+├── frontend/                          # Web frontends (optional or later phase)
+│   ├── index.html
+│   ├── dashboard.html
+│   ├── static/
+│   │   ├── css/
+│   │   └── js/
+│   └── api_client.js                  # JS code calling backend endpoints
+│
+├── docs/                             # Project documentation
+│   ├── ArchitectureDiagram.png
+│   ├── Flowchart.png
+│   ├── API_Documentation.md
+│   └── DeveloperGuide.md
+│
+├── .gitignore
+└── README.md                        # Repository-wide overview
 
+## Project Modules
+
+- `auth_service`: Handles user registration, login, and OTP authentication.
+- `ceo_service`: CEO dashboard for managing vendors, approving transactions, and monitoring audit logs.
+- `vendor_service`: Vendor dashboard for order management, receipt verification, and transaction approvals.
+- `integrations`: WhatsApp, Instagram, and SMS gateway APIs.
+- `common`: Shared configurations, database connections, and utilities.
+
+## Setup Instructions
+
+1. Clone the repository.
+2. Follow individual module README files for detailed setup.
+3. Configure your environment variables and API credentials as per `.env.example`.
+4. Deploy infrastructure using scripts in the `infrastructure/` folder.
+5. Run backend and optionally frontend components.
+
+## Contribution
+
+Please refer to each module's README for contribution guidelines.
