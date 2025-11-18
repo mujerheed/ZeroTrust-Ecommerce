@@ -265,3 +265,47 @@ def get_error_response(error_code: str, error_message: str) -> Dict[str, Any]:
         "message": error_message,
         "timestamp": datetime.utcnow().isoformat()
     }
+
+
+def rate_limit_check(client_ip: str, action: str, max_attempts: int, window_minutes: int) -> None:
+    """
+    Rate limiting wrapper for backward compatibility with auth_routes.py.
+    
+    This function wraps the common/security.rate_limit function with a different
+    signature that accepts client IP directly instead of Request object.
+    
+    Args:
+        client_ip (str): Client IP address for rate limiting
+        action (str): Action identifier (e.g., 'ceo_register', 'otp_verify')
+        max_attempts (int): Maximum allowed attempts within the time window
+        window_minutes (int): Time window in minutes
+    
+    Raises:
+        HTTPException: If rate limit is exceeded (429 status code)
+    
+    Example:
+        rate_limit_check("192.168.1.1", "ceo_login", max_attempts=5, window_minutes=15)
+    """
+    from fastapi import HTTPException
+    from starlette.status import HTTP_429_TOO_MANY_REQUESTS
+    import time
+    from threading import Lock
+    
+    # Simple in-memory rate limiter (mirrors common/security.py implementation)
+    if not hasattr(rate_limit_check, '_limits'):
+        rate_limit_check._limits = {}
+        rate_limit_check._lock = Lock()
+    
+    identifier = f"{action}:{client_ip}"
+    now = int(time.time())
+    period_seconds = window_minutes * 60
+    window = now // period_seconds
+    
+    with rate_limit_check._lock:
+        count = rate_limit_check._limits.get((identifier, window), 0)
+        if count >= max_attempts:
+            raise HTTPException(
+                status_code=HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many {action} attempts. Please try again later."
+            )
+        rate_limit_check._limits[(identifier, window)] = count + 1

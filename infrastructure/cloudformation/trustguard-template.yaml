@@ -1,98 +1,200 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: TrustGuard - Zero Trust Informal E-commerce System Backend Infrastructure
+Description: TrustGuard - Zero Trust Security for Nigerian Informal E-commerce
 
-# ------------------------------------------------------------
-# Globals: Common configuration for all Lambda functions
-# ------------------------------------------------------------
-Globals:
-  Function:
-    Runtime: python3.11
-    MemorySize: 256
-    Timeout: 15
-    Handler: app.lambda_handler
-    Environment:
-      Variables:
-        # These variables will be set by CloudFormation/SAM Outputs
-        USERS_TABLE: !Ref TrustGuardUsersTable
-        OTPS_TABLE: !Ref TrustGuardOTPsTable
-        AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
-        ORDERS_TABLE: !Ref TrustGuardOrdersTable
-        RECEIPTS_TABLE: !Ref TrustGuardReceiptsTable
-        RECEIPT_BUCKET: !Ref TrustGuardReceiptBucket
-        JWT_SECRET: "temporary-dev-secret-key-change-later"  # Hardcoded
-
-# ------------------------------------------------------------
-# Parameters: Allow configuration during deployment
-# ------------------------------------------------------------
+# ============================================================
+# PARAMETERS: Configuration for deployment flexibility
+# ============================================================
 Parameters:
-  # Unique name for the S3 bucket to store payment receipts
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Deployment environment (dev or prod)
+  
+  HighValueThreshold:
+    Type: Number
+    Default: 1000000
+    Description: Order amount threshold (₦) for CEO escalation (default ₦1,000,000)
+  
   BucketNamePrefix:
     Type: String
-    Description: A unique prefix for the receipt storage S3 bucket name.
     Default: trustguard-receipts
+    Description: Prefix for S3 receipt bucket name
 
-# ------------------------------------------------------------
-# Resources: Define the core security and data infrastructure
-# ------------------------------------------------------------
+# ============================================================
+# GLOBALS: Common configuration for all Lambda functions
+# ============================================================
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 512
+    Timeout: 30
+    Environment:
+      Variables:
+        ENV: !Ref Environment
+        AWS_REGION: !Ref AWS::Region
+        HIGH_VALUE_THRESHOLD: !Ref HighValueThreshold
+
+# ============================================================
+# RESOURCES: Infrastructure components
+# ============================================================
 Resources:
 
-  # 1. DynamoDB Tables (Data & State Storage)
+  # ========== KMS KEY (Customer Managed) ==========
+  # Zero Trust: Encrypt everything with customer-managed key
+  TrustGuardKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Customer-managed key for encrypting receipts, DynamoDB tables, and secrets
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Enable IAM Root Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          
+          - Sid: Allow Lambda Service
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:GenerateDataKey"
+              - "kms:DescribeKey"
+            Resource: "*"
+          
+          - Sid: Allow DynamoDB Service
+            Effect: Allow
+            Principal:
+              Service: dynamodb.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:DescribeKey"
+              - "kms:CreateGrant"
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "kms:ViaService": !Sub "dynamodb.${AWS::Region}.amazonaws.com"
+          
+          - Sid: Allow S3 Service
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:GenerateDataKey"
+            Resource: "*"
 
-  # Stores primary user data (Vendor, Buyer, CEO)
+  TrustGuardKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/trustguard-${Environment}"
+      TargetKeyId: !Ref TrustGuardKMSKey
+
+  # ========== SECRETS MANAGER ==========
+  # Zero Trust: Never hardcode secrets
+  TrustGuardSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "/TrustGuard/${Environment}/app"
+      Description: JWT secret and application secrets
+      KmsKeyId: !Ref TrustGuardKMSKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"JWT_SECRET":"REPLACE_ME_AFTER_DEPLOYMENT"}'
+        GenerateStringKey: "DUMMY"
+        PasswordLength: 1
+
+  TrustGuardMetaSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "/TrustGuard/${Environment}/meta"
+      Description: Meta WhatsApp/Instagram API credentials (APP_ID, APP_SECRET, tokens per CEO)
+      KmsKeyId: !Ref TrustGuardKMSKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"APP_ID":"REPLACE_ME","APP_SECRET":"REPLACE_ME"}'
+        GenerateStringKey: "DUMMY"
+        PasswordLength: 1
+
+  # ========== DYNAMODB TABLES ==========
+  
+  # Users Table: Stores Buyers, Vendors, CEOs
   TrustGuardUsersTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: TrustGuard-Users
+      TableName: !Sub "TrustGuard-Users-${Environment}"
       AttributeDefinitions:
         - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: ceo_id
           AttributeType: S
       KeySchema:
         - AttributeName: user_id
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ByCEOID
+          KeySchema:
+            - AttributeName: ceo_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
       BillingMode: PAY_PER_REQUEST
-      # Data is encrypted at rest by default in DynamoDB
       SSESpecification:
         SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
-  # Stores time-sensitive, single-use OTP codes
+  # OTPs Table: Time-limited OTP codes with TTL
   TrustGuardOTPsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: TrustGuard-OTPs
+      TableName: !Sub "TrustGuard-OTPs-${Environment}"
       AttributeDefinitions:
         - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: request_id
           AttributeType: S
       KeySchema:
         - AttributeName: user_id
           KeyType: HASH
-      BillingMode: PAY_PER_REQUEST
-      # CRITICAL: Automatically deletes OTPs after their expiration time (TTL)
+        - AttributeName: request_id
+          KeyType: RANGE
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
+      BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
 
-  # Stores immutable logs of all security-critical actions (Zero Trust - Assume Breach)
+  # Audit Logs Table: Immutable security event logs
   TrustGuardAuditLogsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: TrustGuard-AuditLogs
+      TableName: !Sub "TrustGuard-AuditLogs-${Environment}"
       AttributeDefinitions:
         - AttributeName: log_id
+          AttributeType: S
+        - AttributeName: actor_id
           AttributeType: S
         - AttributeName: timestamp
           AttributeType: N
       KeySchema:
         - AttributeName: log_id
           KeyType: HASH
-        - AttributeName: timestamp
-          KeyType: RANGE
-      LocalSecondaryIndexes:
-        - IndexName: TimestampIndex
+      GlobalSecondaryIndexes:
+        - IndexName: ByActor
           KeySchema:
-            - AttributeName: log_id
+            - AttributeName: actor_id
               KeyType: HASH
             - AttributeName: timestamp
               KeyType: RANGE
@@ -101,21 +203,22 @@ Resources:
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
-    
-  # Stores order data (transactions, statuses)
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # Orders Table: Transaction and receipt metadata
   TrustGuardOrdersTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: TrustGuard-Orders
-      BillingMode: PAY_PER_REQUEST
+      TableName: !Sub "TrustGuard-Orders-${Environment}"
       AttributeDefinitions:
         - AttributeName: order_id
           AttributeType: S
         - AttributeName: vendor_id
           AttributeType: S
-        - AttributeName: buyer_id
-          AttributeType: S
-        - AttributeName: order_status
+        - AttributeName: ceo_id
           AttributeType: S
         - AttributeName: created_at
           AttributeType: N
@@ -123,201 +226,343 @@ Resources:
         - AttributeName: order_id
           KeyType: HASH
       GlobalSecondaryIndexes:
-        # GSI for vendor to query their assigned orders
-        - IndexName: VendorIndex
+        - IndexName: ByVendorAndCEO
           KeySchema:
             - AttributeName: vendor_id
               KeyType: HASH
-            - AttributeName: created_at
+            - AttributeName: ceo_id
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
-        # GSI for vendor to query orders by status
-        - IndexName: VendorStatusIndex
-          KeySchema:
-            - AttributeName: vendor_id
-              KeyType: HASH
-            - AttributeName: order_status
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
-        # GSI for buyer orders (for future buyer portal)
-        - IndexName: BuyerIndex
-          KeySchema:
-            - AttributeName: buyer_id
-              KeyType: HASH
-            - AttributeName: created_at
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
+      BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
-    
-  # Stores receipt metadata (links to S3 objects, associated orders)
-  TrustGuardReceiptsTable:
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # Escalations Table: High-value/flagged transactions requiring CEO approval
+  TrustGuardEscalationsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: TrustGuard-Receipts
-      BillingMode: PAY_PER_REQUEST
+      TableName: !Sub "TrustGuard-Escalations-${Environment}"
       AttributeDefinitions:
-        - AttributeName: order_id
+        - AttributeName: escalation_id
           AttributeType: S
-        - AttributeName: uploaded_at
-          AttributeType: N
+        - AttributeName: ceo_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
       KeySchema:
-        - AttributeName: order_id
+        - AttributeName: escalation_id
           KeyType: HASH
       GlobalSecondaryIndexes:
-        # GSI to query receipts by upload timestamp
-        - IndexName: UploadTimeIndex
+        - IndexName: ByCEOPending
           KeySchema:
-            - AttributeName: uploaded_at
+            - AttributeName: ceo_id
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # CEO Mapping Table: Maps WhatsApp phone_number_id / Instagram page_id to ceo_id
+  TrustGuardCEOMappingTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "TrustGuard-CEOMapping-${Environment}"
+      AttributeDefinitions:
+        - AttributeName: phone_number_id
+          AttributeType: S
+        - AttributeName: page_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: phone_number_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ByPageID
+          KeySchema:
+            - AttributeName: page_id
               KeyType: HASH
           Projection:
             ProjectionType: ALL
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
+      BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
 
-  # 2. S3 Bucket (Secure Receipt Storage)
-
-  # Stores proof of payment (receipt images) - all encrypted
+  # ========== S3 BUCKET (Receipts) ==========
   TrustGuardReceiptBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "${BucketNamePrefix}-${AWS::AccountId}-${AWS::Region}"
-      # Enforce all objects to be encrypted at rest (Zero Trust - Assume Breach)
+      BucketName: !Sub "${BucketNamePrefix}-${AWS::AccountId}-${Environment}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref TrustGuardKMSKey
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+            Status: Enabled
+      VersioningConfiguration:
+        Status: Enabled
 
-  # 3. Lambda Functions (Backend Services)
+  # S3 Bucket Policy: Enforce encryption and SSL
+  TrustGuardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TrustGuardReceiptBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyUnencryptedObjectUploads
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:PutObject"
+            Resource: !Sub "${TrustGuardReceiptBucket.Arn}/*"
+            Condition:
+              StringNotEquals:
+                "s3:x-amz-server-side-encryption": "aws:kms"
+          
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: 
+              - !Sub "${TrustGuardReceiptBucket.Arn}/*"
+              - !GetAtt TrustGuardReceiptBucket.Arn
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
 
-  # Handles user authentication (OTP request/verification)
-  AuthServiceLambda:
+  # ========== SNS TOPICS ==========
+  # SNS Topic for CEO escalation alerts (SMS + Email)
+  EscalationAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "TrustGuard-EscalationAlert-${Environment}"
+      DisplayName: TrustGuard High-Value Transaction Alerts
+      KmsMasterKeyId: !Ref TrustGuardKMSKey
+
+  # ========== IAM ROLE (Least Privilege) ==========
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "TrustGuard-LambdaExecution-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt TrustGuardUsersTable.Arn
+                  - !GetAtt TrustGuardOTPsTable.Arn
+                  - !GetAtt TrustGuardAuditLogsTable.Arn
+                  - !GetAtt TrustGuardOrdersTable.Arn
+                  - !GetAtt TrustGuardEscalationsTable.Arn
+                  - !GetAtt TrustGuardCEOMappingTable.Arn
+                  - !Sub "${TrustGuardUsersTable.Arn}/index/*"
+                  - !Sub "${TrustGuardOrdersTable.Arn}/index/*"
+                  - !Sub "${TrustGuardEscalationsTable.Arn}/index/*"
+                  - !Sub "${TrustGuardCEOMappingTable.Arn}/index/*"
+                  - !Sub "${TrustGuardAuditLogsTable.Arn}/index/*"
+        
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub "${TrustGuardReceiptBucket.Arn}/*"
+        
+        - PolicyName: KMSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:DescribeKey
+                Resource: !GetAtt TrustGuardKMSKey.Arn
+        
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref TrustGuardSecrets
+                  - !Ref TrustGuardMetaSecrets
+        
+        - PolicyName: SNSPublish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref EscalationAlertTopic
+
+  # ========== LAMBDA FUNCTIONS ==========
+  
+  # AuthService: OTP generation and verification
+  AuthService:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "TrustGuard-AuthService-${Environment}"
       CodeUri: ../../backend/
-      Description: Core service for OTP generation and verification.
-      # CRITICAL: Least Privilege IAM Policies
-      Policies:
-        # CRUD on Users table
-        - DynamoDBCrudPolicy:
-            TableName: !Ref TrustGuardUsersTable
-        # CRUD on OTPs table (including TTL management)
-        - DynamoDBCrudPolicy:
-            TableName: !Ref TrustGuardOTPsTable
-        # Write-only access to the immutable Audit Logs table
-        - Statement:
-            Effect: Allow
-            Action:
-              - dynamodb:PutItem
-            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+      Handler: app.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          JWT_SECRET_ARN: !Ref TrustGuardSecrets
+          USERS_TABLE: !Ref TrustGuardUsersTable
+          OTPS_TABLE: !Ref TrustGuardOTPsTable
+          AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
       Events:
         ApiAuth:
           Type: Api
           Properties:
-            Path: /auth
+            Path: /auth/{proxy+}
             Method: ANY
 
-  # Handles secure receipt upload and access
-  ReceiptServiceLambda:
+  # VendorService: Vendor dashboard and order management
+  VendorService:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "TrustGuard-VendorService-${Environment}"
       CodeUri: ../../backend/
-      Description: Manages secure S3 uploads and receipt access permissions.
-      Policies:
-        # Read/Write access to the Receipt Bucket
-        - S3CrudPolicy:
-            BucketName: !Ref TrustGuardReceiptBucket
-        # Write-only access to Audit Logs table
-        - Statement:
-            Effect: Allow
-            Action:
-              - dynamodb:PutItem
-            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
-      Events:
-        ApiReceipt:
-          Type: Api
-          Properties:
-            Path: /receipt
-            Method: ANY
-
-  # Handles vendor-specific data (transactions, dashboards)
-  VendorServiceLambda:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: ../../backend/
-      Description: Service for Vendor dashboard data access.
-      Policies:
-        # Read access to Users table
-        - Statement:
-            Effect: Allow
-            Action:
-              - dynamodb:GetItem
-              - dynamodb:Query
-              - dynamodb:PutItem
-              - dynamodb:UpdateItem
-            Resource: 
-              - !GetAtt TrustGuardUsersTable.Arn
-              - !GetAtt TrustGuardOrdersTable.Arn
-              - !GetAtt TrustGuardReceiptsTable.Arn
-              - !Sub "${TrustGuardOrdersTable.Arn}/index/*"     # For GSI access
-              - !Sub "${TrustGuardReceiptsTable.Arn}/index/*"   # For GSI access
-        # Write-only access to Audit Logs table
-        - Statement:
-            Effect: Allow
-            Action:
-              - dynamodb:PutItem
-            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+      Handler: app.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          ORDERS_TABLE: !Ref TrustGuardOrdersTable
+          USERS_TABLE: !Ref TrustGuardUsersTable
+          ESCALATIONS_TABLE: !Ref TrustGuardEscalationsTable
+          AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
+          ESCALATION_SNS_TOPIC_ARN: !Ref EscalationAlertTopic
       Events:
         ApiVendor:
           Type: Api
           Properties:
-            Path: /vendor
+            Path: /vendor/{proxy+}
             Method: ANY
 
-# Handles CEO-specific dashboard and admin actions (vendor management, approvals, audit logs)
-  CEOServiceLambda:
+  # CEOService: CEO dashboard, approvals, audit logs
+  CEOService:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "TrustGuard-CEOService-${Environment}"
       CodeUri: ../../backend/
-      Description: Service for CEO dashboard and escalated transaction approvals.
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref TrustGuardUsersTable
-        - Statement:
-            Effect: Allow
-            Action:
-              - dynamodb:PutItem
-            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
-        - Statement:
-            Effect: Allow
-            Action:
-              - dynamodb:GetItem
-              - dynamodb:Query
-            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+      Handler: app.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          ESCALATIONS_TABLE: !Ref TrustGuardEscalationsTable
+          ORDERS_TABLE: !Ref TrustGuardOrdersTable
+          USERS_TABLE: !Ref TrustGuardUsersTable
+          AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
+          OTPS_TABLE: !Ref TrustGuardOTPsTable
       Events:
         ApiCEO:
           Type: Api
           Properties:
-            Path: /ceo
+            Path: /ceo/{proxy+}
             Method: ANY
 
-# ------------------------------------------------------------
-# Outputs: Display key resources for easy reference
-# ------------------------------------------------------------
+  # ReceiptService: Receipt upload and presigned URL generation
+  ReceiptService:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "TrustGuard-ReceiptService-${Environment}"
+      CodeUri: ../../backend/
+      Handler: app.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          RECEIPT_BUCKET: !Ref TrustGuardReceiptBucket
+          KMS_KEY_ID: !Ref TrustGuardKMSKey
+          ORDERS_TABLE: !Ref TrustGuardOrdersTable
+          AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
+      Events:
+        ApiReceipt:
+          Type: Api
+          Properties:
+            Path: /receipt/{proxy+}
+            Method: ANY
+
+# ============================================================
+# OUTPUTS: Key infrastructure details
+# ============================================================
 Outputs:
-  WebAPIGatewayUrl:
-    Description: "API Gateway endpoint URL for the serverless backend"
+  APIEndpoint:
+    Description: API Gateway endpoint URL
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
-  UsersTableName:
-    Description: "DynamoDB Table Name for User Identity"
-    Value: !Ref TrustGuardUsersTable
-  ReceiptBucketName:
-    Description: "S3 Bucket Name for Encrypted Receipts"
+    Export:
+      Name: !Sub "TrustGuard-API-${Environment}"
+  
+  ReceiptBucket:
+    Description: S3 bucket for encrypted receipts
     Value: !Ref TrustGuardReceiptBucket
+    Export:
+      Name: !Sub "TrustGuard-ReceiptBucket-${Environment}"
+  
+  KMSKeyId:
+    Description: KMS key ID for encryption
+    Value: !Ref TrustGuardKMSKey
+    Export:
+      Name: !Sub "TrustGuard-KMSKey-${Environment}"
+  
+  SecretsArn:
+    Description: Secrets Manager ARN for app secrets (inject JWT_SECRET here)
+    Value: !Ref TrustGuardSecrets
+  
+  MetaSecretsArn:
+    Description: Secrets Manager ARN for Meta API secrets
+    Value: !Ref TrustGuardMetaSecrets
+  
+  EscalationTopicArn:
+    Description: SNS topic ARN for escalation alerts
+    Value: !Ref EscalationAlertTopic
+    Export:
+      Name: !Sub "TrustGuard-EscalationTopic-${Environment}"

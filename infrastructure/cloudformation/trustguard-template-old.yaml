@@ -1,0 +1,323 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: TrustGuard - Zero Trust Informal E-commerce System Backend Infrastructure
+
+# ------------------------------------------------------------
+# Globals: Common configuration for all Lambda functions
+# ------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.11
+    MemorySize: 256
+    Timeout: 15
+    Handler: app.lambda_handler
+    Environment:
+      Variables:
+        # These variables will be set by CloudFormation/SAM Outputs
+        USERS_TABLE: !Ref TrustGuardUsersTable
+        OTPS_TABLE: !Ref TrustGuardOTPsTable
+        AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
+        ORDERS_TABLE: !Ref TrustGuardOrdersTable
+        RECEIPTS_TABLE: !Ref TrustGuardReceiptsTable
+        RECEIPT_BUCKET: !Ref TrustGuardReceiptBucket
+        JWT_SECRET: "temporary-dev-secret-key-change-later"  # Hardcoded
+
+# ------------------------------------------------------------
+# Parameters: Allow configuration during deployment
+# ------------------------------------------------------------
+Parameters:
+  # Unique name for the S3 bucket to store payment receipts
+  BucketNamePrefix:
+    Type: String
+    Description: A unique prefix for the receipt storage S3 bucket name.
+    Default: trustguard-receipts
+
+# ------------------------------------------------------------
+# Resources: Define the core security and data infrastructure
+# ------------------------------------------------------------
+Resources:
+
+  # 1. DynamoDB Tables (Data & State Storage)
+
+  # Stores primary user data (Vendor, Buyer, CEO)
+  TrustGuardUsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TrustGuard-Users
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      # Data is encrypted at rest by default in DynamoDB
+      SSESpecification:
+        SSEEnabled: true
+
+  # Stores time-sensitive, single-use OTP codes
+  TrustGuardOTPsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TrustGuard-OTPs
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      # CRITICAL: Automatically deletes OTPs after their expiration time (TTL)
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # Stores immutable logs of all security-critical actions (Zero Trust - Assume Breach)
+  TrustGuardAuditLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TrustGuard-AuditLogs
+      AttributeDefinitions:
+        - AttributeName: log_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: log_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      LocalSecondaryIndexes:
+        - IndexName: TimestampIndex
+          KeySchema:
+            - AttributeName: log_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+    
+  # Stores order data (transactions, statuses)
+  TrustGuardOrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TrustGuard-Orders
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: vendor_id
+          AttributeType: S
+        - AttributeName: buyer_id
+          AttributeType: S
+        - AttributeName: order_status
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: N
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        # GSI for vendor to query their assigned orders
+        - IndexName: VendorIndex
+          KeySchema:
+            - AttributeName: vendor_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # GSI for vendor to query orders by status
+        - IndexName: VendorStatusIndex
+          KeySchema:
+            - AttributeName: vendor_id
+              KeyType: HASH
+            - AttributeName: order_status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # GSI for buyer orders (for future buyer portal)
+        - IndexName: BuyerIndex
+          KeySchema:
+            - AttributeName: buyer_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+    
+  # Stores receipt metadata (links to S3 objects, associated orders)
+  TrustGuardReceiptsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TrustGuard-Receipts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: uploaded_at
+          AttributeType: N
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        # GSI to query receipts by upload timestamp
+        - IndexName: UploadTimeIndex
+          KeySchema:
+            - AttributeName: uploaded_at
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # 2. S3 Bucket (Secure Receipt Storage)
+
+  # Stores proof of payment (receipt images) - all encrypted
+  TrustGuardReceiptBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${BucketNamePrefix}-${AWS::AccountId}-${AWS::Region}"
+      # Enforce all objects to be encrypted at rest (Zero Trust - Assume Breach)
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # 3. Lambda Functions (Backend Services)
+
+  # Handles user authentication (OTP request/verification)
+  AuthServiceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../backend/
+      Description: Core service for OTP generation and verification.
+      # CRITICAL: Least Privilege IAM Policies
+      Policies:
+        # CRUD on Users table
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TrustGuardUsersTable
+        # CRUD on OTPs table (including TTL management)
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TrustGuardOTPsTable
+        # Write-only access to the immutable Audit Logs table
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+      Events:
+        ApiAuth:
+          Type: Api
+          Properties:
+            Path: /auth
+            Method: ANY
+
+  # Handles secure receipt upload and access
+  ReceiptServiceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../backend/
+      Description: Manages secure S3 uploads and receipt access permissions.
+      Policies:
+        # Read/Write access to the Receipt Bucket
+        - S3CrudPolicy:
+            BucketName: !Ref TrustGuardReceiptBucket
+        # Write-only access to Audit Logs table
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+      Events:
+        ApiReceipt:
+          Type: Api
+          Properties:
+            Path: /receipt
+            Method: ANY
+
+  # Handles vendor-specific data (transactions, dashboards)
+  VendorServiceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../backend/
+      Description: Service for Vendor dashboard data access.
+      Policies:
+        # Read access to Users table
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:Query
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+            Resource: 
+              - !GetAtt TrustGuardUsersTable.Arn
+              - !GetAtt TrustGuardOrdersTable.Arn
+              - !GetAtt TrustGuardReceiptsTable.Arn
+              - !Sub "${TrustGuardOrdersTable.Arn}/index/*"     # For GSI access
+              - !Sub "${TrustGuardReceiptsTable.Arn}/index/*"   # For GSI access
+        # Write-only access to Audit Logs table
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+      Events:
+        ApiVendor:
+          Type: Api
+          Properties:
+            Path: /vendor
+            Method: ANY
+
+# Handles CEO-specific dashboard and admin actions (vendor management, approvals, audit logs)
+  CEOServiceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../backend/
+      Description: Service for CEO dashboard and escalated transaction approvals.
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TrustGuardUsersTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:Query
+            Resource: !GetAtt TrustGuardAuditLogsTable.Arn
+      Events:
+        ApiCEO:
+          Type: Api
+          Properties:
+            Path: /ceo
+            Method: ANY
+
+# ------------------------------------------------------------
+# Outputs: Display key resources for easy reference
+# ------------------------------------------------------------
+Outputs:
+  WebAPIGatewayUrl:
+    Description: "API Gateway endpoint URL for the serverless backend"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  UsersTableName:
+    Description: "DynamoDB Table Name for User Identity"
+    Value: !Ref TrustGuardUsersTable
+  ReceiptBucketName:
+    Description: "S3 Bucket Name for Encrypted Receipts"
+    Value: !Ref TrustGuardReceiptBucket

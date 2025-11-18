@@ -3,30 +3,35 @@ DynamoDB operations for vendor_service.
 Handles orders, receipts, and vendor-specific data access.
 """
 
-import os
 import time
-import boto3
+from common.db_connection import dynamodb
+from common.config import settings
+from common.logger import logger
 from typing import List, Dict, Optional
 
-# Initialize DynamoDB resource
-dynamodb = boto3.resource('dynamodb')
 
 # Table names from environment
-USERS_TABLE = os.getenv("USERS_TABLE")
-ORDERS_TABLE = os.getenv("ORDERS_TABLE", "TrustGuard-Orders")  # Add to CloudFormation
-RECEIPTS_TABLE = os.getenv("RECEIPTS_TABLE", "TrustGuard-Receipts")  # Add to CloudFormation
-AUDIT_LOGS_TABLE = os.getenv("AUDIT_LOGS_TABLE")
+USERS_TABLE = dynamodb.Table(settings.USERS_TABLE)
+ORDERS_TABLE = dynamodb.Table(settings.ORDERS_TABLE)
+RECEIPTS_TABLE = dynamodb.Table(settings.RECEIPTS_TABLE)
+AUDIT_LOGS_TABLE = dynamodb.Table(settings.AUDIT_LOGS_TABLE)
 
 def get_vendor(vendor_id: str) -> Optional[Dict]:
     """Get vendor details by vendor_id."""
-    table = dynamodb.Table(USERS_TABLE)
+    table = USERS_TABLE
     response = table.get_item(Key={"user_id": vendor_id})
     vendor = response.get("Item")
+    
+    logger.info("Vendor lookup", extra={
+        "vendor_id": vendor_id, 
+        "found": vendor is not None
+    })
+
     return vendor if vendor and vendor.get("role") == "Vendor" else None
 
 def get_vendor_assigned_orders(vendor_id: str, status: str = None) -> List[Dict]:
     """Get all orders assigned to a specific vendor."""
-    table = dynamodb.Table(ORDERS_TABLE)
+    table = ORDERS_TABLE
     
     # Query orders assigned to this vendor
     if status:
@@ -49,13 +54,13 @@ def get_vendor_assigned_orders(vendor_id: str, status: str = None) -> List[Dict]
 
 def get_order(order_id: str) -> Optional[Dict]:
     """Get specific order details."""
-    table = dynamodb.Table(ORDERS_TABLE)
+    table = ORDERS_TABLE
     response = table.get_item(Key={"order_id": order_id})
     return response.get("Item")
 
 def update_order_status(order_id: str, new_status: str, vendor_id: str, notes: str = None):
     """Update order status and log the change."""
-    table = dynamodb.Table(ORDERS_TABLE)
+    table = ORDERS_TABLE
     
     update_expression = "SET order_status = :status, updated_at = :timestamp, updated_by = :vendor"
     expression_values = {
@@ -76,7 +81,7 @@ def update_order_status(order_id: str, new_status: str, vendor_id: str, notes: s
 
 def get_receipt(order_id: str) -> Optional[Dict]:
     """Get receipt details for an order."""
-    table = dynamodb.Table(RECEIPTS_TABLE)
+    table = RECEIPTS_TABLE
     response = table.get_item(Key={"order_id": order_id})
     return response.get("Item")
 
@@ -99,7 +104,7 @@ def log_vendor_action(vendor_id: str, action: str, order_id: str = None, details
     if not AUDIT_LOGS_TABLE:
         return
         
-    table = dynamodb.Table(AUDIT_LOGS_TABLE)
+    table = AUDIT_LOGS_TABLE
     table.put_item(Item={
         "log_id": f"{vendor_id}-{int(time.time())}",
         "timestamp": int(time.time()),
@@ -109,4 +114,10 @@ def log_vendor_action(vendor_id: str, action: str, order_id: str = None, details
         "order_id": order_id or "",
         "details": details or {},
         "status": "SUCCESS"
+    })
+
+    logger.info("Vendor action logged", extra={
+        "vendor_id": vendor_id,
+        "action": action,
+        "order_id": order_id
     })

@@ -5,6 +5,7 @@ Enhanced utility functions for vendor_service.
 import jwt
 import os
 from datetime import datetime
+from common.security import decode_jwt
 from typing import Dict, Any, Optional
 
 SECRET_KEY = os.getenv("JWT_SECRET", "temporary_dev_secret")

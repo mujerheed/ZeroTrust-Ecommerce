@@ -1,17 +1,16 @@
 """
 DynamoDB operations for CEO service.
 """
-
-import os
 import time
 import boto3
+import os
+from  common.config import settings
+from common.db_connection import dynamodb
 from typing import Dict, Any, List, Optional
 
-dynamodb = boto3.resource('dynamodb')
-
-USERS_TABLE = os.getenv("USERS_TABLE")
-ORDERS_TABLE = os.getenv("ORDERS_TABLE")
-AUDIT_LOGS_TABLE = os.getenv("AUDIT_LOGS_TABLE")
+USERS_TABLE = dynamodb.Table(settings.USERS_TABLE)
+ORDERS_TABLE = dynamodb.Table(settings.ORDERS_TABLE)
+AUDIT_LOGS_TABLE = dynamodb.Table(settings.AUDIT_LOGS_TABLE)
 
 # Reuse unified OTP table via auth_service
 from auth_service.database import save_otp, get_otp, delete_otp

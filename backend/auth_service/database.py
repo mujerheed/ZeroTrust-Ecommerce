@@ -2,17 +2,14 @@
 DynamoDB integration for auth_service.
 """
 
-import os
 import time
-import boto3
-
-# Initialize DynamoDB resource
-dynamodb = boto3.resource('dynamodb')
+from common.config import settings
+from common.db_connection import dynamodb
 
 # Table names from environment (set by SAM/CloudFormation)
-USERS_TABLE     = os.getenv("USERS_TABLE")
-OTPS_TABLE      = os.getenv("OTPS_TABLE")
-AUDIT_LOGS_TABLE = os.getenv("AUDIT_LOGS_TABLE")
+USERS_TABLE     = dynamodb.Table(settings.USERS_TABLE)
+OTPS_TABLE      = dynamodb.Table(settings.OTPS_TABLE)
+AUDIT_LOGS_TABLE = dynamodb.Table(settings.AUDIT_LOGS_TABLE)
 
 def get_user(user_id: str) -> dict:
     """
