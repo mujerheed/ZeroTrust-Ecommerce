@@ -70,3 +70,18 @@ def get_audit_logs(limit: int = 100) -> List[Dict[str, Any]]:
     table = dynamodb.Table(AUDIT_LOGS_TABLE)
     resp  = table.scan(Limit=limit)
     return resp.get("Items", [])
+
+
+def get_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a single order by order_id."""
+    table = dynamodb.Table(settings.ORDERS_TABLE)
+    resp = table.get_item(Key={"order_id": order_id})
+    return resp.get("Item")
+
+
+def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a user (buyer/vendor/CEO) by user_id."""
+    table = dynamodb.Table(settings.USERS_TABLE)
+    resp = table.get_item(Key={"user_id": user_id})
+    return resp.get("Item")
+

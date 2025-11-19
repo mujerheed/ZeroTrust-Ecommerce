@@ -11,7 +11,9 @@ from .ceo_logic import (
     login_ceo, list_vendors, add_vendor,
     remove_vendor, view_flagged_orders,
     approve_transaction, decline_transaction,
-    fetch_audit_logs
+    fetch_audit_logs, generate_ceo_otp,
+    get_ceo_pending_escalations, get_escalation_details,
+    approve_escalation_with_otp, reject_escalation_with_otp
 )
 from .utils import format_response, verify_ceo_token
 
@@ -103,3 +105,173 @@ async def decline_transaction_endpoint(order_id: str, ceo_id: str = Depends(get_
 async def audit_logs_endpoint(limit: int = 100, ceo_id: str = Depends(get_current_ceo)):
     logs = fetch_audit_logs(limit)
     return format_response("success", "Audit logs fetched", logs)
+
+
+# ============================================================
+# ESCALATION MANAGEMENT (High-Value Transaction Approval)
+# ============================================================
+
+@router.get("/escalations")
+async def get_pending_escalations(
+    limit: int = 50,
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Get all pending escalations requiring CEO approval.
+    
+    Returns enriched escalation data with order details, buyer/vendor info,
+    and Textract OCR results.
+    """
+    try:
+        escalations = get_ceo_pending_escalations(ceo_id, limit)
+        return format_response(
+            "success",
+            f"Retrieved {len(escalations)} pending escalations",
+            {"escalations": escalations, "count": len(escalations)}
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve escalations: {str(e)}"
+        )
+
+
+@router.get("/escalations/{escalation_id}")
+async def get_escalation_detail(
+    escalation_id: str,
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Get detailed information about a specific escalation.
+    
+    Includes:
+    - Order context (product, amount, delivery address)
+    - Receipt preview (S3 pre-signed URL)
+    - Textract OCR results (if available)
+    - Vendor notes and flags
+    - Buyer information (PII masked)
+    """
+    try:
+        details = get_escalation_details(ceo_id, escalation_id)
+        return format_response(
+            "success",
+            "Escalation details retrieved",
+            details
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve escalation details: {str(e)}"
+        )
+
+
+class EscalationDecisionRequest(BaseModel):
+    otp: str
+    notes: Optional[str] = None
+
+
+@router.post("/escalations/{escalation_id}/approve")
+async def approve_escalation(
+    escalation_id: str,
+    req: EscalationDecisionRequest,
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Approve an escalation after OTP verification.
+    
+    Zero Trust: Requires fresh OTP for approval.
+    
+    Actions:
+    - Verifies CEO OTP (single-use)
+    - Updates escalation status to APPROVED
+    - Updates order status to 'approved'
+    - Sends buyer notification (order approved)
+    - Sends vendor notification
+    - Logs action to audit table
+    """
+    try:
+        result = approve_escalation_with_otp(
+            ceo_id=ceo_id,
+            escalation_id=escalation_id,
+            otp=req.otp,
+            decision_notes=req.notes
+        )
+        return format_response(
+            "success",
+            f"Escalation approved. Order {result['order_id']} will proceed with fulfillment.",
+            result
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to approve escalation: {str(e)}"
+        )
+
+
+@router.post("/escalations/{escalation_id}/reject")
+async def reject_escalation(
+    escalation_id: str,
+    req: EscalationDecisionRequest,
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Reject an escalation after OTP verification.
+    
+    Zero Trust: Requires fresh OTP for rejection.
+    
+    Actions:
+    - Verifies CEO OTP (single-use)
+    - Updates escalation status to REJECTED
+    - Updates order status to 'rejected'
+    - Sends buyer notification (order rejected + reason)
+    - Sends vendor notification
+    - Logs action to audit table
+    """
+    try:
+        result = reject_escalation_with_otp(
+            ceo_id=ceo_id,
+            escalation_id=escalation_id,
+            otp=req.otp,
+            decision_notes=req.notes
+        )
+        return format_response(
+            "success",
+            f"Escalation rejected. Order {result['order_id']} has been canceled.",
+            result
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to reject escalation: {str(e)}"
+        )
+
+
+@router.post("/escalations/request-otp")
+async def request_escalation_otp(ceo_id: str = Depends(get_current_ceo)):
+    """
+    Generate a fresh OTP for CEO escalation approval/rejection.
+    
+    OTP sent via SMS/Email (implementation dependent).
+    Required before approve/reject actions (Zero Trust re-authentication).
+    """
+    try:
+        otp = generate_ceo_otp(ceo_id)
+        # TODO: Send OTP via SNS (SMS) or SES (email)
+        # For now, return in response (dev/testing only)
+        return format_response(
+            "success",
+            "OTP generated for escalation decision",
+            {"ceo_id": ceo_id, "otp_sent": True, "dev_otp": otp}  # Remove dev_otp in production
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate OTP: {str(e)}"
+        )
+
