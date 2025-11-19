@@ -12,7 +12,8 @@ import os
 import json
 import boto3
 from dotenv import load_dotenv
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 from typing import Optional
 from functools import lru_cache
 
@@ -29,20 +30,28 @@ class Settings(BaseSettings):
     and loaded from .env file in local development.
     """
     
+    # Pydantic v2 config
+    model_config = ConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"  # Ignore extra fields from environment
+    )
+    
     # Environment
-    AWS_REGION: str
+    AWS_REGION: str = "us-east-1"
     ENVIRONMENT: str = "dev"
     
     # DynamoDB Tables
-    USERS_TABLE: str
-    OTPS_TABLE: str
-    ORDERS_TABLE: str
-    AUDIT_LOGS_TABLE: str
-    ESCALATIONS_TABLE: str
-    CEO_MAPPING_TABLE: str
+    USERS_TABLE: str = "TrustGuard-Users"
+    OTPS_TABLE: str = "TrustGuard-OTPs"
+    ORDERS_TABLE: str = "TrustGuard-Orders"
+    RECEIPTS_TABLE: str = "TrustGuard-Receipts"
+    AUDIT_LOGS_TABLE: str = "TrustGuard-AuditLogs"
+    ESCALATIONS_TABLE: str = "TrustGuard-Escalations"
+    CEO_MAPPING_TABLE: str = "TrustGuard-CEOMapping"
     
     # S3
-    RECEIPT_BUCKET: str
+    RECEIPT_BUCKET: str = "trustguard-receipts"
     
     # Secrets (local fallback)
     JWT_SECRET: str = "dev-secret-change-in-production"
@@ -52,10 +61,6 @@ class Settings(BaseSettings):
     
     # Business Logic
     HIGH_VALUE_THRESHOLD: int = 1000000  # ₦1,000,000
-    
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
     
     def _is_lambda_environment(self) -> bool:
         """Check if running in AWS Lambda environment."""

@@ -7,14 +7,15 @@ from fastapi import APIRouter, HTTPException, status, Request
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel, EmailStr
 from typing import Optional
-from auth_logic import (
+from .auth_logic import (
     register_ceo, login_ceo, login_vendor, 
     verify_otp_universal, create_vendor_account
 )
-from utils import (
+from .utils import (
     format_response, validate_phone_number, validate_email,
     rate_limit_check, log_security_event
 )
+from ceo_service.utils import verify_ceo_token
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)

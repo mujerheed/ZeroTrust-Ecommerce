@@ -7,11 +7,11 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 from typing import Optional, List
-from vendor_logic import (
+from .vendor_logic import (
     get_vendor_dashboard_data, get_vendor_orders, get_order_details,
     verify_receipt, get_receipt_details, search_vendor_orders
 )
-from utils import format_response, verify_vendor_token
+from .utils import format_response, verify_vendor_token
 
 router = APIRouter()
 security = HTTPBearer()

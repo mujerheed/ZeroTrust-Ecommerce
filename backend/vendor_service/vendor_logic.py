@@ -5,7 +5,7 @@ Includes high-value escalation workflow (₦1M+) requiring CEO approval.
 """
 
 from typing import List, Dict, Optional
-from database import (
+from .database import (
     get_vendor, get_vendor_assigned_orders, get_order, get_receipt,
     update_order_status, get_vendor_stats, log_vendor_action
 )

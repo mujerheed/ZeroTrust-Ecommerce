@@ -14,3 +14,8 @@ s3 = boto3.client(
     "s3",
     region_name=settings.AWS_REGION
 )
+
+sns_client = boto3.client(
+    "sns",
+    region_name=settings.AWS_REGION
+)
