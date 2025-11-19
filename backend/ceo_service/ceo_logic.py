@@ -13,6 +13,7 @@ import time
 import bcrypt
 import random
 import string
+from decimal import Decimal
 from typing import Dict, Any, List, Optional
 from .database import (
     # CEO operations
@@ -318,7 +319,7 @@ def update_ceo_profile(
     if delivery_fee is not None:
         if delivery_fee < 0:
             raise ValueError("Delivery fee cannot be negative")
-        updates["delivery_fee"] = float(delivery_fee)
+        updates["delivery_fee"] = Decimal(str(delivery_fee))
     
     # Sensitive field: email (requires OTP)
     if email is not None:
