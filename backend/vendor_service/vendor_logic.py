@@ -2,13 +2,16 @@
 Complete business logic for vendor operations.
 Handles order management, receipt verification, and vendor dashboard features.
 Includes high-value escalation workflow (₦1M+) requiring CEO approval.
+Implements Textract OCR-based auto-approval logic.
 """
 
 from typing import List, Dict, Optional
 from .database import (
     get_vendor, get_vendor_assigned_orders, get_order, get_receipt,
-    update_order_status, get_vendor_stats, log_vendor_action
+    update_order_status, get_vendor_stats, log_vendor_action,
+    get_vendor_preferences, save_vendor_preferences
 )
+from .ocr_validator import validate_receipt_ocr, should_escalate_to_ceo
 from common.config import settings
 from common.escalation_db import create_escalation
 from common.sns_client import send_escalation_alert, send_buyer_notification
@@ -346,5 +349,157 @@ def search_vendor_orders(vendor_id: str, search_term: str, search_field: str = "
         "search_field": search_field,
         "results_count": len(filtered_orders)
     })
+    
+    return filtered_orders
+
+
+def process_receipt_after_ocr(order_id: str) -> Dict:
+    """
+    Automatically process receipt after Textract OCR completes.
+    
+    This function is called by the Textract worker Lambda after OCR processing.
+    It implements the auto-approval logic:
+    
+    1. Check if amount ≥ ₦1,000,000 → Escalate to CEO (high-value)
+    2. Validate OCR results (amount match, confidence, etc.)
+    3. If OCR passes → Auto-approve receipt
+    4. If OCR fails → Flag for manual vendor review
+    
+    Args:
+        order_id: Order identifier
+    
+    Returns:
+        Dict with processing result and action taken
+    """
+    order = get_order(order_id)
+    if not order:
+        raise ValueError(f"Order {order_id} not found")
+    
+    receipt = get_receipt(order_id)
+    if not receipt:
+        raise ValueError(f"Receipt for order {order_id} not found")
+    
+    vendor_id = order.get("vendor_id")
+    vendor = get_vendor(vendor_id)
+    if not vendor:
+        raise ValueError(f"Vendor {vendor_id} not found")
+    
+    # STEP 1: Check for high-value escalation (₦1M+)
+    should_escalate, escalation_reason = should_escalate_to_ceo(order, high_value_threshold=1000000)
+    
+    if should_escalate:
+        # Auto-escalate to CEO for high-value transactions
+        update_order_status(order_id, "escalated", "SYSTEM", f"Auto-escalated: {escalation_reason}")
+        
+        escalation_id = create_order_escalation(
+            order=order,
+            vendor_id=vendor_id,
+            reason=escalation_reason,
+            notes=f"Automatically escalated after OCR processing: {escalation_reason}"
+        )
+        
+        logger.info("Receipt auto-escalated to CEO (high-value)", extra={
+            "order_id": order_id,
+            "amount": order.get("amount"),
+            "escalation_id": escalation_id,
+            "reason": escalation_reason
+        })
+        
+        return {
+            "action": "ESCALATED_TO_CEO",
+            "reason": escalation_reason,
+            "escalation_id": escalation_id,
+            "message": f"High-value transaction escalated to CEO for approval"
+        }
+    
+    # STEP 2: Get vendor preferences for Textract settings
+    preferences = get_vendor_preferences(vendor_id)
+    textract_enabled = preferences.get("textract_enabled", True)
+    
+    if not textract_enabled:
+        # Vendor disabled Textract auto-approval - require manual review
+        update_order_status(order_id, "pending_receipt", "SYSTEM", "Textract disabled - awaiting manual vendor review")
+        
+        logger.info("Textract auto-approval disabled by vendor", extra={
+            "order_id": order_id,
+            "vendor_id": vendor_id
+        })
+        
+        return {
+            "action": "MANUAL_REVIEW_REQUIRED",
+            "reason": "TEXTRACT_DISABLED",
+            "message": "Vendor has disabled Textract auto-approval - manual review required"
+        }
+    
+    # STEP 3: Validate receipt using Textract OCR
+    validation_result = validate_receipt_ocr(
+        order=order,
+        receipt=receipt,
+        vendor=vendor,
+        confidence_threshold=preferences.get("min_ocr_confidence", 75.0),
+        amount_tolerance_percent=preferences.get("amount_tolerance_percent", 2.0)
+    )
+    
+    # STEP 4: Take action based on validation result
+    if validation_result.auto_approve:
+        # OCR validation PASSED → Auto-approve receipt
+        update_order_status(
+            order_id, 
+            "receipt_verified", 
+            "SYSTEM_AUTO_APPROVE", 
+            f"Auto-approved via Textract OCR (confidence: {validation_result.details.get('ocr_confidence', 0):.1f}%)"
+        )
+        
+        # Notify buyer of approval
+        send_buyer_notification(
+            buyer_id=order.get("buyer_id"),
+            message=f"✅ Your receipt has been verified! Order #{order_id[:8]} is now approved.",
+            platform=order.get("platform", "whatsapp")
+        )
+        
+        logger.info("Receipt AUTO-APPROVED via Textract OCR", extra={
+            "order_id": order_id,
+            "vendor_id": vendor_id,
+            "ocr_confidence": validation_result.details.get("ocr_confidence"),
+            "validation_reason": validation_result.reason
+        })
+        
+        return {
+            "action": "AUTO_APPROVED",
+            "reason": validation_result.reason,
+            "details": validation_result.details,
+            "message": "Receipt automatically approved - OCR validation passed"
+        }
+    
+    else:
+        # OCR validation FAILED → Flag for manual vendor review
+        update_order_status(
+            order_id,
+            "flagged_for_review",
+            "SYSTEM_OCR_FLAG",
+            f"OCR validation failed: {validation_result.reason}"
+        )
+        
+        # Store validation details in order record for vendor review
+        log_vendor_action(
+            vendor_id,
+            "RECEIPT_FLAGGED_BY_OCR",
+            order_id=order_id,
+            details=validation_result.to_dict()
+        )
+        
+        logger.warning("Receipt FLAGGED for manual review - OCR validation failed", extra={
+            "order_id": order_id,
+            "vendor_id": vendor_id,
+            "validation_reason": validation_result.reason,
+            "details": validation_result.details
+        })
+        
+        return {
+            "action": "FLAGGED_FOR_MANUAL_REVIEW",
+            "reason": validation_result.reason,
+            "details": validation_result.details,
+            "message": "Receipt flagged for manual vendor review - OCR validation failed"
+        }
     
     return filtered_orders[:20]  # Limit to 20 results

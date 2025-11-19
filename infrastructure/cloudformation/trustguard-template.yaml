@@ -324,6 +324,50 @@ Resources:
         - Key: DataRetention
           Value: Auto-expire-after-1-hour
 
+  # CEO Config Table: Chatbot customization per CEO (greeting, tone, preferences)
+  TrustGuardCEOConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "TrustGuard-CEOConfig-${Environment}"
+      AttributeDefinitions:
+        - AttributeName: ceo_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ceo_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
+      Tags:
+        - Key: Purpose
+          Value: CEO-Chatbot-Configuration
+        - Key: DataSensitivity
+          Value: Low
+
+  # Vendor Preferences Table: Auto-approve thresholds, Textract settings
+  TrustGuardVendorPreferencesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "TrustGuard-VendorPreferences-${Environment}"
+      AttributeDefinitions:
+        - AttributeName: vendor_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: vendor_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
+      Tags:
+        - Key: Purpose
+          Value: Vendor-Business-Preferences
+        - Key: DataSensitivity
+          Value: Low
+
   # ========== S3 BUCKET (Receipts) ==========
   TrustGuardReceiptBucket:
     Type: AWS::S3::Bucket
@@ -418,6 +462,9 @@ Resources:
                   - !GetAtt TrustGuardOrdersTable.Arn
                   - !GetAtt TrustGuardEscalationsTable.Arn
                   - !GetAtt TrustGuardCEOMappingTable.Arn
+                  - !GetAtt TrustGuardConversationStateTable.Arn
+                  - !GetAtt TrustGuardCEOConfigTable.Arn
+                  - !GetAtt TrustGuardVendorPreferencesTable.Arn
                   - !Sub "${TrustGuardUsersTable.Arn}/index/*"
                   - !Sub "${TrustGuardOrdersTable.Arn}/index/*"
                   - !Sub "${TrustGuardEscalationsTable.Arn}/index/*"

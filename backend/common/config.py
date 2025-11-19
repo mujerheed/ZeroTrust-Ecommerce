@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     ESCALATIONS_TABLE: str = "TrustGuard-Escalations"
     CEO_MAPPING_TABLE: str = "TrustGuard-CEOMapping"
     CONVERSATION_STATE_TABLE: str = "TrustGuard-ConversationState"
+    CEO_CONFIG_TABLE: str = "TrustGuard-CEOConfig"
+    VENDOR_PREFERENCES_TABLE: str = "TrustGuard-VendorPreferences"
     
     # S3
     RECEIPT_BUCKET: str = "trustguard-receipts"

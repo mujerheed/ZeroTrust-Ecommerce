@@ -318,6 +318,46 @@ def extract_receipt_id_from_s3_key(s3_key: str) -> Optional[str]:
         name_without_ext = filename.rsplit('.', 1)[0]
         
         # Extract receipt_id (before timestamp)
+        # Format: receipt_abc123_20251119_140000
+        parts = name_without_ext.split('_')
+        if len(parts) >= 2:
+            receipt_id = f"{parts[0]}_{parts[1]}"  # receipt_abc123
+            return receipt_id
+        
+        return None
+    
+    except Exception as e:
+        print(f"Failed to extract receipt_id from {s3_key}: {str(e)}")
+        return None
+
+
+def extract_order_id_from_receipt_id(receipt_id: str) -> Optional[str]:
+    """
+    Extract order_id from receipt_id.
+    
+    Receipt IDs are typically tied to orders. This function queries DynamoDB
+    to find the order associated with this receipt.
+    
+    Args:
+        receipt_id: Receipt identifier
+    
+    Returns:
+        order_id or None
+    """
+    try:
+        # Query receipts table to get order_id
+        response = receipts_table.get_item(Key={'receipt_id': receipt_id})
+        receipt = response.get('Item')
+        
+        if receipt:
+            return receipt.get('order_id')
+        
+        return None
+    
+    except Exception as e:
+        print(f"Failed to extract order_id from receipt {receipt_id}: {str(e)}")
+        return None
+
         receipt_id = name_without_ext.split('_')[0]
         
         return receipt_id
@@ -377,6 +417,26 @@ def lambda_handler(event, context):
             
             if success:
                 print(f"Successfully processed receipt {receipt_id}")
+                
+                # IMPORTANT: Trigger auto-approval logic after OCR completes
+                try:
+                    # Extract order_id from receipt_id or S3 key
+                    order_id = extract_order_id_from_receipt_id(receipt_id)
+                    
+                    if order_id:
+                        print(f"Triggering auto-approval logic for order {order_id}")
+                        
+                        # Import vendor_logic here to avoid circular imports
+                        import sys
+                        sys.path.append('/opt/python')  # Lambda layer path
+                        from vendor_service.vendor_logic import process_receipt_after_ocr
+                        
+                        result = process_receipt_after_ocr(order_id)
+                        print(f"Auto-processing result: {result['action']} - {result['message']}")
+                    
+                except Exception as auto_approve_error:
+                    print(f"Auto-approval logic failed (non-critical): {str(auto_approve_error)}")
+                    # Don't fail the whole process - OCR data is already saved
             else:
                 print(f"Failed to update receipt {receipt_id}")
         

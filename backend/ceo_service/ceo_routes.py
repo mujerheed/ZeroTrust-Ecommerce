@@ -29,6 +29,7 @@ from .ceo_logic import (
     update_chatbot_settings,
     preview_chatbot_conversation
 )
+from common.analytics import get_ceo_fraud_trends, get_vendor_performance_summary
 from .utils import format_response, verify_ceo_token
 from common.logger import logger
 
@@ -824,3 +825,72 @@ async def preview_chatbot_endpoint(
             "error": str(e)
         })
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate preview")
+
+
+# ==================== ANALYTICS ENDPOINTS ====================
+
+@router.get("/analytics/fraud-trends", status_code=status.HTTP_200_OK)
+async def get_fraud_trends(
+    days: int = Query(default=7, ge=1, le=90),
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Get daily fraud flag counts over the past N days for charts.
+    
+    Query params:
+        - days: Number of days to look back (1-90, default 7)
+    
+    Returns:
+        Array of {date: "YYYY-MM-DD", fraud_count: number}
+    """
+    try:
+        trend_data = get_ceo_fraud_trends(ceo_id, days)
+        
+        return format_response(
+            "success",
+            f"Fraud trend data for past {days} days",
+            {
+                "data": trend_data,
+                "days_requested": days,
+                "total_fraud_events": sum(d["fraud_count"] for d in trend_data)
+            }
+        )
+    except Exception as e:
+        logger.error("Failed to retrieve fraud trends", extra={"ceo_id": ceo_id, "error": str(e)})
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve fraud trends")
+
+
+@router.get("/analytics/vendor-performance", status_code=status.HTTP_200_OK)
+async def get_vendor_performance(
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Get performance summary for all vendors (for table/chart display).
+    
+    Returns:
+        Array of vendor performance metrics:
+        [
+            {
+                "vendor_id": "vendor_123",
+                "vendor_name": "Ada's Fashion",
+                "total_orders": 42,
+                "flag_rate": 0.024,  # 2.4%
+                "avg_approval_time_minutes": 18
+            },
+            ...
+        ]
+    """
+    try:
+        performance_data = get_vendor_performance_summary(ceo_id)
+        
+        return format_response(
+            "success",
+            f"Vendor performance data for {len(performance_data)} vendors",
+            {
+                "vendors": performance_data,
+                "total_vendors": len(performance_data)
+            }
+        )
+    except Exception as e:
+        logger.error("Failed to retrieve vendor performance", extra={"ceo_id": ceo_id, "error": str(e)})
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve vendor performance")

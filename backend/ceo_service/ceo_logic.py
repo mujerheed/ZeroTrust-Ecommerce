@@ -26,7 +26,9 @@ from .database import (
     # Audit logs
     get_audit_logs, write_audit_log,
     # User queries
-    get_user_by_id
+    get_user_by_id,
+    # CEO config
+    save_chatbot_config, get_chatbot_config
 )
 from auth_service.database import save_otp, get_otp, delete_otp
 from common.security import create_jwt
@@ -424,23 +426,81 @@ def onboard_vendor(ceo_id: str, name: str, email: str, phone: str) -> Dict[str, 
     }
 
 
+def calculate_vendor_risk_score(vendor_id: str, ceo_id: str) -> float:
+    """
+    Calculate vendor risk score based on fraud flags and completed orders.
+    
+    Risk Score Formula:
+        risk_score = (total_fraud_flags / total_completed_orders) if completed_orders > 0 else 0
+    
+    Args:
+        vendor_id: Vendor identifier
+        ceo_id: CEO identifier (for tenancy check)
+    
+    Returns:
+        Float between 0.0 and 1.0 (0 = no risk, 1 = high risk)
+    """
+    from .database import get_audit_logs
+    
+    # Count fraud-related flags from audit logs
+    fraud_actions = ["ORDER_FLAGGED", "RECEIPT_FLAGGED", "ESCALATION_CREATED", "FRAUD_DETECTED"]
+    
+    # Get audit logs for this vendor
+    all_logs = get_audit_logs(ceo_id=ceo_id, user_id=vendor_id, limit=1000)
+    fraud_flags = [log for log in all_logs if log.get("action") in fraud_actions]
+    total_flags = len(fraud_flags)
+    
+    # Count completed orders (status = APPROVED or CEO_APPROVED)
+    from .database import get_orders_for_ceo
+    all_orders = get_orders_for_ceo(ceo_id=ceo_id, vendor_id=vendor_id)
+    completed_orders = [
+        order for order in all_orders 
+        if order.get("order_status") in ["APPROVED", "CEO_APPROVED", "verified", "completed"]
+    ]
+    total_completed = len(completed_orders)
+    
+    # Calculate risk score
+    if total_completed == 0:
+        risk_score = 0.0  # No orders yet = no risk data
+    else:
+        risk_score = min(total_flags / total_completed, 1.0)  # Cap at 1.0
+    
+    logger.info(
+        "Vendor risk score calculated",
+        extra={
+            "vendor_id": vendor_id,
+            "ceo_id": ceo_id,
+            "total_flags": total_flags,
+            "total_completed": total_completed,
+            "risk_score": round(risk_score, 3)
+        }
+    )
+    
+    return round(risk_score, 3)
+
+
 def list_vendors_for_ceo(ceo_id: str) -> List[Dict[str, Any]]:
     """
-    List all vendors managed by a CEO (multi-tenancy).
+    List all vendors managed by a CEO (multi-tenancy) with risk scores.
     
     Args:
         ceo_id: CEO identifier
     
     Returns:
-        List of vendor records (without sensitive data)
+        List of vendor records with risk scores (without sensitive data)
     """
     vendors = get_all_vendors_for_ceo(ceo_id)
     
-    # Remove sensitive data
+    # Add risk score to each vendor and remove sensitive data
     for vendor in vendors:
         vendor.pop("password_hash", None)
+        vendor_id = vendor.get("user_id")
+        if vendor_id:
+            vendor["risk_score"] = calculate_vendor_risk_score(vendor_id, ceo_id)
+        else:
+            vendor["risk_score"] = 0.0
     
-    logger.info("Vendors listed", extra={
+    logger.info("Vendors listed with risk scores", extra={
         "ceo_id": ceo_id,
         "count": len(vendors)
     })
@@ -1041,7 +1101,7 @@ def reject_escalation_with_otp(
 
 def get_chatbot_settings(ceo_id: str) -> Dict[str, Any]:
     """
-    Get chatbot customization settings for a CEO.
+    Get chatbot customization settings for a CEO from CEO_CONFIG_TABLE.
     
     Args:
         ceo_id: CEO identifier
@@ -1053,28 +1113,29 @@ def get_chatbot_settings(ceo_id: str) -> Dict[str, Any]:
     if not ceo:
         raise ValueError(f"CEO {ceo_id} not found")
     
-    # Return chatbot settings or defaults
-    default_settings = {
-        "welcome_message": "👋 Welcome! How can I help you today?\n\nType 'help' to see available commands.",
-        "business_hours": "Mon-Fri 9AM-6PM",
-        "tone": "friendly",  # Options: friendly, professional, casual
-        "language": "en",  # ISO 639-1 code
-        "auto_responses": {
+    # Fetch from dedicated config table
+    config = get_chatbot_config(ceo_id)
+    
+    # Return chatbot settings with structure
+    chatbot_settings = {
+        "welcome_message": config.get("greeting", "👋 Welcome! How can I help you today?\n\nType 'help' to see available commands."),
+        "business_hours": config.get("business_hours", "Mon-Fri 9AM-6PM"),
+        "tone": config.get("tone", "friendly and professional"),
+        "language": config.get("language", "en"),
+        "auto_responses": config.get("auto_responses", {
             "greeting": "Hello! Welcome to our store. How can I assist you?",
             "thanks": "You're welcome! Let me know if you need anything else.",
             "goodbye": "Thank you for shopping with us! Have a great day! 😊"
-        },
-        "enabled_features": {
+        }),
+        "enabled_features": config.get("enabled_features", {
             "address_collection": True,
             "order_tracking": True,
             "receipt_upload": True,
-            "product_catalog": False  # Future feature
-        }
+            "product_catalog": False
+        })
     }
     
-    chatbot_settings = ceo.get("chatbot_settings", default_settings)
-    
-    logger.info("Chatbot settings retrieved", extra={
+    logger.info("Chatbot settings retrieved from CEO_CONFIG_TABLE", extra={
         "ceo_id": ceo_id,
         "tone": chatbot_settings.get("tone"),
         "language": chatbot_settings.get("language")
@@ -1093,7 +1154,7 @@ def update_chatbot_settings(
     enabled_features: Optional[Dict[str, bool]] = None
 ) -> Dict[str, Any]:
     """
-    Update chatbot customization settings for a CEO.
+    Update chatbot customization settings for a CEO in CEO_CONFIG_TABLE.
     
     Args:
         ceo_id: CEO identifier
@@ -1114,64 +1175,46 @@ def update_chatbot_settings(
     if not ceo:
         raise ValueError(f"CEO {ceo_id} not found")
     
-    # Get current settings or defaults
-    current_settings = get_chatbot_settings(ceo_id)
+    # Get current settings from CEO_CONFIG_TABLE
+    current_config = get_chatbot_config(ceo_id)
     
-    # Build updates
-    updates = {}
+    # Build updates for config table
+    config_updates = {}
     
     if welcome_message is not None:
         if len(welcome_message) > 500:
             raise ValueError("Welcome message too long (max 500 characters)")
-        updates["welcome_message"] = welcome_message.strip()
+        config_updates["greeting"] = welcome_message.strip()
     
     if business_hours is not None:
-        updates["business_hours"] = business_hours.strip()
+        config_updates["business_hours"] = business_hours.strip()
     
     if tone is not None:
-        valid_tones = ["friendly", "professional", "casual"]
-        if tone not in valid_tones:
-            raise ValueError(f"Invalid tone. Must be one of: {', '.join(valid_tones)}")
-        updates["tone"] = tone
+        config_updates["tone"] = tone.strip()
     
     if language is not None:
         # Basic validation (ISO 639-1 codes are 2 letters)
         if len(language) != 2:
             raise ValueError("Invalid language code. Use ISO 639-1 format (e.g., 'en', 'fr')")
-        updates["language"] = language.lower()
+        config_updates["language"] = language.lower()
     
     if auto_responses is not None:
-        # Validate auto_responses keys
-        valid_keys = ["greeting", "thanks", "goodbye", "error", "unknown"]
-        for key in auto_responses.keys():
-            if key not in valid_keys:
-                raise ValueError(f"Invalid auto_response key: {key}. Valid keys: {', '.join(valid_keys)}")
-        
         # Merge with current auto_responses
-        current_auto_responses = current_settings.get("auto_responses", {})
+        current_auto_responses = current_config.get("auto_responses", {})
         current_auto_responses.update(auto_responses)
-        updates["auto_responses"] = current_auto_responses
+        config_updates["auto_responses"] = current_auto_responses
     
     if enabled_features is not None:
-        # Validate feature keys
-        valid_features = ["address_collection", "order_tracking", "receipt_upload", "product_catalog"]
-        for key in enabled_features.keys():
-            if key not in valid_features:
-                raise ValueError(f"Invalid feature: {key}. Valid features: {', '.join(valid_features)}")
-        
         # Merge with current enabled_features
-        current_features = current_settings.get("enabled_features", {})
+        current_features = current_config.get("enabled_features", {})
         current_features.update(enabled_features)
-        updates["enabled_features"] = current_features
+        config_updates["enabled_features"] = current_features
     
-    if not updates:
+    if not config_updates:
         raise ValueError("No settings to update")
     
-    # Merge updates with current settings
-    new_settings = {**current_settings, **updates}
-    
-    # Update CEO record
-    update_ceo(ceo_id, {"chatbot_settings": new_settings})
+    # Save to CEO_CONFIG_TABLE
+    updated_config = save_chatbot_config(ceo_id, **config_updates)
     
     # Log audit event
     write_audit_log(
@@ -1179,18 +1222,19 @@ def update_chatbot_settings(
         action="chatbot_settings_updated",
         user_id=ceo_id,
         details={
-            "updated_fields": list(updates.keys()),
-            "tone": new_settings.get("tone"),
-            "language": new_settings.get("language")
+            "updated_fields": list(config_updates.keys()),
+            "tone": updated_config.get("tone"),
+            "language": updated_config.get("language")
         }
     )
     
-    logger.info("Chatbot settings updated", extra={
+    logger.info("Chatbot settings updated in CEO_CONFIG_TABLE", extra={
         "ceo_id": ceo_id,
-        "updated_fields": list(updates.keys())
+        "updated_fields": list(config_updates.keys())
     })
     
-    return new_settings
+    # Return in expected format
+    return get_chatbot_settings(ceo_id)
 
 
 def preview_chatbot_conversation(

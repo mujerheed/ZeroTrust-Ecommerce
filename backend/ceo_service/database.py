@@ -18,6 +18,7 @@ from typing import Dict, Any, List, Optional
 USERS_TABLE = dynamodb.Table(settings.USERS_TABLE)
 ORDERS_TABLE = dynamodb.Table(settings.ORDERS_TABLE)
 AUDIT_LOGS_TABLE = dynamodb.Table(settings.AUDIT_LOGS_TABLE)
+CEO_CONFIG_TABLE = dynamodb.Table(settings.CEO_CONFIG_TABLE)
 
 # Reuse unified OTP table via auth_service
 from auth_service.database import save_otp, get_otp, delete_otp
@@ -533,3 +534,61 @@ def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
     resp = USERS_TABLE.get_item(Key={"user_id": user_id})
     return resp.get("Item")
 
+
+# ==================== CEO Chatbot Configuration ====================
+
+def save_chatbot_config(
+    ceo_id: str,
+    greeting: str = None,
+    tone: str = None,
+    **additional_settings
+) -> Dict[str, Any]:
+    """
+    Save or update chatbot configuration for CEO.
+    
+    Args:
+        ceo_id: CEO identifier
+        greeting: Custom chatbot greeting message
+        tone: Chatbot tone/personality (e.g., "friendly", "professional")
+        **additional_settings: Any other chatbot preferences
+    
+    Returns:
+        Updated config record
+    """
+    config_record = {
+        "ceo_id": ceo_id,
+        "greeting": greeting or "Welcome to our business! How can I help you today?",
+        "tone": tone or "friendly and professional",
+        "updated_at": int(time.time()),
+    }
+    
+    # Add any additional settings
+    config_record.update(additional_settings)
+    
+    CEO_CONFIG_TABLE.put_item(Item=config_record)
+    return config_record
+
+
+def get_chatbot_config(ceo_id: str) -> Dict[str, Any]:
+    """
+    Retrieve chatbot configuration for CEO.
+    Returns default config if not customized.
+    
+    Args:
+        ceo_id: CEO identifier
+    
+    Returns:
+        Chatbot config with greeting, tone, etc.
+    """
+    resp = CEO_CONFIG_TABLE.get_item(Key={"ceo_id": ceo_id})
+    
+    if resp.get("Item"):
+        return resp["Item"]
+    
+    # Return default configuration
+    return {
+        "ceo_id": ceo_id,
+        "greeting": "Welcome to our business! How can I help you today?",
+        "tone": "friendly and professional",
+        "updated_at": None,
+    }

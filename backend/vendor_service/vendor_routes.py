@@ -11,6 +11,8 @@ from .vendor_logic import (
     get_vendor_dashboard_data, get_vendor_orders, get_order_details,
     verify_receipt, get_receipt_details, search_vendor_orders
 )
+from .preferences import save_vendor_preferences, get_vendor_preferences
+from common.analytics import get_vendor_orders_by_day
 from .utils import format_response, verify_vendor_token
 
 router = APIRouter()
@@ -119,3 +121,157 @@ async def get_stats(vendor_id: str = Depends(get_current_vendor)):
         })
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ========== VENDOR PREFERENCES ==========
+
+class VendorPreferencesUpdateRequest(BaseModel):
+    auto_approve_threshold: Optional[int] = None  # Amount in kobo (e.g., 500000 = ₦5,000)
+    textract_enabled: Optional[bool] = None
+
+
+@router.get("/preferences")
+async def get_preferences(vendor_id: str = Depends(get_current_vendor)):
+    """
+    Get vendor business preferences.
+    
+    Returns:
+        - auto_approve_threshold: Amount in kobo (0 = disabled)
+        - textract_enabled: Boolean
+        - updated_at: Unix timestamp or None
+    """
+    try:
+        preferences = get_vendor_preferences(vendor_id)
+        return format_response("success", "Preferences retrieved", preferences)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve preferences: {str(e)}")
+
+
+@router.put("/preferences")
+async def update_preferences(
+    req: VendorPreferencesUpdateRequest,
+    vendor_id: str = Depends(get_current_vendor)
+):
+    """
+    Update vendor business preferences.
+    
+    Body:
+        - auto_approve_threshold: Optional[int] - Amount in kobo below which receipts auto-approve (0 = disabled, max ₦1M)
+        - textract_enabled: Optional[bool] - Enable/disable Textract OCR verification
+    
+    Returns:
+        Updated preferences record
+    """
+    try:
+        updated_preferences = save_vendor_preferences(
+            vendor_id=vendor_id,
+            auto_approve_threshold=req.auto_approve_threshold,
+            textract_enabled=req.textract_enabled
+        )
+        return format_response("success", "Preferences updated successfully", updated_preferences)
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update preferences: {str(e)}")
+
+
+# ========== ANALYTICS ==========
+
+@router.get("/analytics/orders-by-day")
+async def get_orders_by_day(
+    days: int = 7,
+    vendor_id: str = Depends(get_current_vendor)
+):
+    """
+    Get daily order counts for the past N days.
+    
+    Query params:
+        - days: Number of days to look back (default 7, max 90)
+    
+    Returns:
+        Array of {date: "YYYY-MM-DD", count: number}
+    """
+    if days > 90:
+        raise HTTPException(status_code=400, detail="Maximum days is 90")
+    
+    try:
+        daily_data = get_vendor_orders_by_day(vendor_id, days)
+        return format_response("success", f"Daily order data for past {days} days", {
+            "data": daily_data,
+            "days_requested": days,
+            "total_orders": sum(d["count"] for d in daily_data)
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve analytics: {str(e)}")
+
+
+# ========== NOTIFICATIONS ==========
+
+@router.get("/notifications/unread")
+async def get_unread_notifications(vendor_id: str = Depends(get_current_vendor)):
+    """
+    Get count of unread notifications (new orders since last check).
+    
+    Frontend should poll this endpoint every 30 seconds for real-time updates.
+    
+    Returns:
+        {
+            "new_count": number,
+            "notifications": [
+                {
+                    "order_id": "ord_123",
+                    "buyer_id": "wa_234...",
+                    "amount": 12500,
+                    "status": "RECEIPT_UPLOADED",
+                    "created_at": 1732012345
+                },
+                ...
+            ]
+        }
+    """
+    try:
+        from .database import get_vendor, get_vendor_assigned_orders, USERS_TABLE
+        import time
+        
+        # Get vendor's last_notif_check timestamp
+        vendor = get_vendor(vendor_id)
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+        
+        last_check = vendor.get("last_notif_check", 0)
+        
+        # Get orders created or updated since last check
+        all_orders = get_vendor_assigned_orders(vendor_id, status=None)
+        new_orders = [
+            order for order in all_orders
+            if order.get("updated_at", 0) > last_check
+        ]
+        
+        # Update last_notif_check timestamp
+        USERS_TABLE.update_item(
+            Key={"user_id": vendor_id},
+            UpdateExpression="SET last_notif_check = :now",
+            ExpressionAttributeValues={":now": int(time.time())}
+        )
+        
+        # Format notifications
+        notifications = []
+        for order in new_orders[:10]:  # Limit to 10 most recent
+            notifications.append({
+                "order_id": order.get("order_id"),
+                "buyer_id": order.get("buyer_id"),
+                "amount": order.get("amount"),
+                "status": order.get("order_status"),
+                "created_at": order.get("created_at"),
+                "updated_at": order.get("updated_at")
+            })
+        
+        return format_response("success", f"{len(new_orders)} new notifications", {
+            "new_count": len(new_orders),
+            "notifications": notifications,
+            "last_check_timestamp": int(time.time())
+        })
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve notifications: {str(e)}")

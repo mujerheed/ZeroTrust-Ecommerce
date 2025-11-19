@@ -15,6 +15,7 @@ USERS_TABLE = dynamodb.Table(settings.USERS_TABLE)
 ORDERS_TABLE = dynamodb.Table(settings.ORDERS_TABLE)
 RECEIPTS_TABLE = dynamodb.Table(settings.RECEIPTS_TABLE)
 AUDIT_LOGS_TABLE = dynamodb.Table(settings.AUDIT_LOGS_TABLE)
+VENDOR_PREFERENCES_TABLE = dynamodb.Table(settings.VENDOR_PREFERENCES_TABLE)
 
 def get_vendor(vendor_id: str) -> Optional[Dict]:
     """Get vendor details by vendor_id."""
