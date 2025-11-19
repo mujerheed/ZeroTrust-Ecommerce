@@ -22,3 +22,5 @@ python-dotenv
 
 #Library for generating secure tokens
 python-json-logger
+#HTTP client library for async API calls (WhatsApp/Instagram)
+httpx>=0.25.0

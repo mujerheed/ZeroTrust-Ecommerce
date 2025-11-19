@@ -198,6 +198,7 @@ async def create_vendor(request: Request, req: CreateVendorRequest, token: str =
         # Verify CEO token
         ceo_id = verify_ceo_token(token.credentials if token else None)
         
+        
         validate_phone_number(req.phone)
         validate_email(req.email)
         
@@ -214,3 +215,178 @@ async def create_vendor(request: Request, req: CreateVendorRequest, token: str =
         
     except Exception as e:
         raise HTTPException(status_code=403, detail="Unauthorized or invalid request")
+
+
+# ========== BUYER AUTHENTICATION VIA WEBHOOKS ==========
+
+@router.get("/webhook/whatsapp")
+async def whatsapp_webhook_verify(request: Request):
+    """
+    WhatsApp webhook verification endpoint (GET).
+    
+    Meta sends a GET request with hub.mode, hub.verify_token, and hub.challenge
+    when setting up the webhook in Business Manager.
+    
+    Query Params:
+        hub.mode: 'subscribe'
+        hub.verify_token: Verification token (must match env config)
+        hub.challenge: Random string to echo back
+    
+    Returns:
+        challenge value if verification successful
+    """
+    from integrations.webhook_handler import handle_webhook_challenge
+    
+    try:
+        result = await handle_webhook_challenge(request)
+        return result['challenge']
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/webhook/whatsapp")
+async def whatsapp_webhook_receive(request: Request):
+    """
+    WhatsApp webhook message receiver (POST).
+    
+    Receives incoming messages from WhatsApp Business API.
+    Validates HMAC signature and routes to chatbot.
+    
+    Headers:
+        X-Hub-Signature-256: HMAC-SHA256 signature
+    
+    Body:
+        WhatsApp webhook payload (JSON)
+    
+    Returns:
+        200 OK to acknowledge receipt
+    """
+    from integrations.webhook_handler import (
+        verify_meta_signature,
+        parse_whatsapp_message,
+        extract_ceo_id_from_metadata,
+        process_webhook_message
+    )
+    from common.config import settings
+    
+    try:
+        # Get app secret from environment or Secrets Manager
+        app_secret = getattr(settings, 'META_APP_SECRET', 'dev_secret')
+        
+        # Verify HMAC signature
+        await verify_meta_signature(request, app_secret)
+        
+        # Parse request body
+        body = await request.json()
+        
+        # Parse WhatsApp message
+        parsed_message = parse_whatsapp_message(body)
+        
+        if not parsed_message:
+            # Not a message event (could be status update)
+            return {"status": "ignored"}
+        
+        # Extract CEO ID for multi-tenancy
+        ceo_id = extract_ceo_id_from_metadata(parsed_message)
+        
+        # Process message and route to chatbot
+        result = await process_webhook_message(parsed_message, ceo_id)
+        
+        return {"status": "processed", "action": result.get('action')}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Log error but return 200 to prevent Meta from retrying
+        from common.logger import logger
+        logger.error(f"WhatsApp webhook error: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/webhook/instagram")
+async def instagram_webhook_verify(request: Request):
+    """
+    Instagram webhook verification endpoint (GET).
+    
+    Meta sends a GET request with hub.mode, hub.verify_token, and hub.challenge
+    when setting up the webhook in Business Manager.
+    
+    Query Params:
+        hub.mode: 'subscribe'
+        hub.verify_token: Verification token (must match env config)
+        hub.challenge: Random string to echo back
+    
+    Returns:
+        challenge value if verification successful
+    """
+    from integrations.webhook_handler import handle_webhook_challenge
+    
+    try:
+        result = await handle_webhook_challenge(request)
+        return result['challenge']
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/webhook/instagram")
+async def instagram_webhook_receive(request: Request):
+    """
+    Instagram webhook message receiver (POST).
+    
+    Receives incoming messages from Instagram Messaging API.
+    Validates HMAC signature and routes to chatbot.
+    
+    Headers:
+        X-Hub-Signature-256: HMAC-SHA256 signature
+    
+    Body:
+        Instagram webhook payload (JSON)
+    
+    Returns:
+        200 OK to acknowledge receipt
+    """
+    from integrations.webhook_handler import (
+        verify_meta_signature,
+        parse_instagram_message,
+        extract_ceo_id_from_metadata,
+        process_webhook_message
+    )
+    from common.config import settings
+    
+    try:
+        # Get app secret from environment or Secrets Manager
+        app_secret = getattr(settings, 'META_APP_SECRET', 'dev_secret')
+        
+        # Verify HMAC signature
+        await verify_meta_signature(request, app_secret)
+        
+        # Parse request body
+        body = await request.json()
+        
+        # Parse Instagram message
+        parsed_message = parse_instagram_message(body)
+        
+        if not parsed_message:
+            # Not a message event
+            return {"status": "ignored"}
+        
+        # Extract CEO ID for multi-tenancy
+        ceo_id = extract_ceo_id_from_metadata(parsed_message)
+        
+        # Process message and route to chatbot
+        result = await process_webhook_message(parsed_message, ceo_id)
+        
+        return {"status": "processed", "action": result.get('action')}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Log error but return 200 to prevent Meta from retrying
+        from common.logger import logger
+        logger.error(f"Instagram webhook error: {str(e)}")
+        return {"status": "error", "message": str(e)}
+

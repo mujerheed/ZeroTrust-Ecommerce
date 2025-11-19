@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     # Business Logic
     HIGH_VALUE_THRESHOLD: int = 1000000  # ₦1,000,000
     
+    # Meta Platform Integration (WhatsApp & Instagram)
+    META_APP_SECRET: str = "dev_meta_app_secret"
+    META_WEBHOOK_VERIFY_TOKEN: str = "trustguard_verify_2025"
+    WHATSAPP_ACCESS_TOKEN: str = ""
+    WHATSAPP_PHONE_NUMBER_ID: str = ""
+    INSTAGRAM_ACCESS_TOKEN: str = ""
+    INSTAGRAM_PAGE_ID: str = ""
+    DEFAULT_CEO_ID: str = "ceo_dev_default"
+    
+    # SMS Configuration
+    SMS_SENDER_ID: str = "TrustGuard"
+    
     def _is_lambda_environment(self) -> bool:
         """Check if running in AWS Lambda environment."""
         return os.getenv("AWS_LAMBDA_FUNCTION_NAME") is not None
