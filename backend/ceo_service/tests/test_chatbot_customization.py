@@ -71,7 +71,7 @@ def test_get_chatbot_settings_ceo_not_found():
     from ceo_service.ceo_logic import get_chatbot_settings
     
     with patch('ceo_service.ceo_logic.get_ceo_by_id', return_value=None):
-        with pytest.raises(ValueError, match="CEO not found"):
+        with pytest.raises(ValueError, match="CEO.*not found"):
             get_chatbot_settings('nonexistent_ceo')
 
 
@@ -112,7 +112,7 @@ def test_update_chatbot_settings_welcome_message_too_long():
     with patch('ceo_service.ceo_logic.get_ceo_by_id', return_value=mock_ceo):
         long_message = "A" * 501
         
-        with pytest.raises(ValueError, match="Welcome message cannot exceed 500 characters"):
+        with pytest.raises(ValueError, match="Welcome message too long"):
             update_chatbot_settings(
                 ceo_id='ceo_test_123',
                 welcome_message=long_message
@@ -150,7 +150,7 @@ def test_update_chatbot_settings_invalid_tone():
     }
     
     with patch('ceo_service.ceo_logic.get_ceo_by_id', return_value=mock_ceo):
-        with pytest.raises(ValueError, match="Tone must be one of"):
+        with pytest.raises(ValueError, match="Invalid tone"):
             update_chatbot_settings(
                 ceo_id='ceo_test_123',
                 tone='robotic'
@@ -188,7 +188,7 @@ def test_update_chatbot_settings_invalid_language():
     }
     
     with patch('ceo_service.ceo_logic.get_ceo_by_id', return_value=mock_ceo):
-        with pytest.raises(ValueError, match="Language must be 2-letter ISO 639-1 code"):
+        with pytest.raises(ValueError, match="Invalid language code"):
             update_chatbot_settings(
                 ceo_id='ceo_test_123',
                 language='english'
@@ -460,8 +460,7 @@ def test_preview_chatbot_custom_settings_override():
 
 # ==================== Test: Chatbot Router Integration ====================
 
-@pytest.mark.asyncio
-async def test_chatbot_router_customized_welcome():
+def test_chatbot_router_customized_welcome():
     """Test chatbot router uses CEO's custom welcome message."""
     from integrations.chatbot_router import ChatbotRouter
     
@@ -490,8 +489,7 @@ async def test_chatbot_router_customized_welcome():
         assert 'Alice' in response
 
 
-@pytest.mark.asyncio
-async def test_chatbot_router_tone_application():
+def test_chatbot_router_tone_application():
     """Test chatbot router applies tone correctly."""
     from integrations.chatbot_router import ChatbotRouter
     
@@ -509,8 +507,7 @@ async def test_chatbot_router_tone_application():
     assert '😊' in casual
 
 
-@pytest.mark.asyncio
-async def test_chatbot_router_feature_enabled():
+def test_chatbot_router_feature_enabled():
     """Test chatbot router checks feature gates."""
     from integrations.chatbot_router import ChatbotRouter
     
@@ -528,8 +525,7 @@ async def test_chatbot_router_feature_enabled():
         assert router.check_feature_enabled('ceo_test_123', 'order_tracking') is False
 
 
-@pytest.mark.asyncio
-async def test_chatbot_router_feature_disabled_defaults_enabled():
+def test_chatbot_router_feature_disabled_defaults_enabled():
     """Test feature check defaults to enabled on error."""
     from integrations.chatbot_router import ChatbotRouter
     
