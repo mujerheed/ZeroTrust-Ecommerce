@@ -376,3 +376,37 @@ def verify_otp(user_id: str, submitted_otp: str) -> Dict[str, Any]:
         'role': record['role']
     }
 
+
+def store_otp(
+    user_id: str,
+    otp_hash: str,
+    role: str,
+    delivery_method: str,
+    platform: Optional[str] = None
+) -> None:
+    """
+    Public wrapper for _store_otp to allow direct OTP storage.
+    Used by chatbot_router for buyer authentication flows.
+    
+    Args:
+        user_id (str): User identifier
+        otp_hash (str): SHA-256 hash of the OTP
+        role (str): User role
+        delivery_method (str): Delivery channel used
+        platform (str, optional): Platform for buyer (whatsapp/instagram)
+    """
+    _store_otp(user_id, otp_hash, role, delivery_method, platform)
+
+
+def hash_otp(otp: str) -> str:
+    """
+    Public wrapper for _hash_otp to allow external hashing.
+    Used when OTP needs to be hashed before storage.
+    
+    Args:
+        otp (str): Plaintext OTP
+    
+    Returns:
+        str: SHA-256 hash of the OTP
+    """
+    return _hash_otp(otp)
