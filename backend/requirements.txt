@@ -2,7 +2,7 @@
 boto3
 
 #Optional: pydantic for structured data validation (good for security)
-pydantic>=2.7.0
+pydantic[email]>=2.7.0
 pydantic-settings>=2.12.0
 
 #Logging library for structured logs (helps with audit trails)
@@ -24,3 +24,13 @@ python-dotenv
 python-json-logger
 #HTTP client library for async API calls (WhatsApp/Instagram)
 httpx>=0.25.0
+
+#HTTP client library for sync API calls (OAuth, external integrations)
+requests>=2.31.0
+
+#Password hashing library
+bcrypt>=4.0.0
+
+#PDF generation library for transaction summaries
+reportlab>=4.0.0
+

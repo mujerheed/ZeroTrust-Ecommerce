@@ -138,6 +138,7 @@ def send_escalation_resolved_notification(
     
     formatted_amount = f"₦{amount:,.2f}"
     decision_emoji = "✅" if decision == "APPROVED" else "❌"
+    action_text = "continue" if decision == "APPROVED" else "be canceled"
     
     subject = f"TrustGuard: Escalation {decision}"
     message = (
@@ -148,7 +149,7 @@ def send_escalation_resolved_notification(
         f"Amount: {formatted_amount}\n"
         f"Decision: {decision}\n"
         f"\n"
-        f"Order processing will {"continue" if decision == "APPROVED" else "be canceled"}."
+        f"Order processing will {action_text}."
     )
     
     try:

@@ -22,6 +22,7 @@ Setup:
 
 import httpx
 import json
+import io
 from typing import Dict, Any, Optional, List
 from common.logger import logger
 from common.config import settings
@@ -401,6 +402,120 @@ Need help? We're here! 💬"""
         except Exception as e:
             logger.error(f"Instagram quick replies send failed: {str(e)}")
             return {'success': False, 'error': str(e)}
+    
+    async def get_media_url(self, media_id: str) -> Optional[str]:
+        """
+        Get media URL from Instagram media ID.
+        
+        Args:
+            media_id: Instagram media attachment ID from webhook payload
+        
+        Returns:
+            Media download URL or None if error
+        
+        Example:
+            >>> url = await get_media_url("1234567890")
+            >>> print(url)
+            "https://scontent.xx.fbcdn.net/..."
+        """
+        media_url = f"https://graph.facebook.com/v18.0/{media_id}"
+        
+        params = {
+            "access_token": self.access_token,
+            "fields": "url,mime_type,file_size"
+        }
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    media_url,
+                    params=params,
+                    timeout=10.0
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    download_url = result.get('url')
+                    mime_type = result.get('mime_type')
+                    file_size = result.get('file_size', 0)
+                    
+                    logger.info(
+                        "Instagram media URL retrieved",
+                        extra={
+                            'media_id': media_id,
+                            'mime_type': mime_type,
+                            'file_size_bytes': file_size
+                        }
+                    )
+                    
+                    return download_url
+                else:
+                    error_data = response.json()
+                    logger.error(
+                        f"Instagram media URL error: {response.status_code}",
+                        extra={'error': error_data, 'media_id': media_id}
+                    )
+                    return None
+        
+        except Exception as e:
+            logger.error(f"Instagram get_media_url failed: {str(e)}", extra={'media_id': media_id})
+            return None
+    
+    async def download_media(self, media_url: str) -> Optional[bytes]:
+        """
+        Download media file from Instagram media URL.
+        
+        Args:
+            media_url: Media download URL (from get_media_url)
+        
+        Returns:
+            Media file bytes or None if error
+        
+        Note:
+            - Supported formats: JPG, PNG, GIF, MP4, etc.
+            - Max file size: 8MB for images, 25MB for videos
+        
+        Example:
+            >>> url = await get_media_url(media_id)
+            >>> file_data = await download_media(url)
+            >>> # Upload to S3...
+        """
+        params = {
+            "access_token": self.access_token
+        }
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    media_url,
+                    params=params,
+                    timeout=30.0,  # Longer timeout for large files
+                    follow_redirects=True
+                )
+                
+                if response.status_code == 200:
+                    media_bytes = response.content
+                    file_size_mb = len(media_bytes) / (1024 * 1024)
+                    
+                    logger.info(
+                        "Instagram media downloaded",
+                        extra={
+                            'file_size_mb': round(file_size_mb, 2),
+                            'content_type': response.headers.get('content-type')
+                        }
+                    )
+                    
+                    return media_bytes
+                else:
+                    logger.error(
+                        f"Instagram media download error: {response.status_code}",
+                        extra={'url': media_url[:50]}
+                    )
+                    return None
+        
+        except Exception as e:
+            logger.error(f"Instagram download_media failed: {str(e)}")
+            return None
 
 
 # Singleton instance

@@ -202,6 +202,11 @@ def parse_whatsapp_message(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         
         # Extract text content
         text_body = None
+        media_id = None
+        media_type = None
+        media_mime_type = None
+        caption = None
+        
         if message_type == 'text':
             text_body = message.get('text', {}).get('body')
         elif message_type == 'interactive':
@@ -211,6 +216,15 @@ def parse_whatsapp_message(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 text_body = interactive.get('button_reply', {}).get('title')
             elif interactive.get('type') == 'list_reply':
                 text_body = interactive.get('list_reply', {}).get('title')
+        elif message_type in ['image', 'video', 'document', 'audio']:
+            # Handle media messages
+            media_data = message.get(message_type, {})
+            media_id = media_data.get('id')
+            media_mime_type = media_data.get('mime_type')
+            caption = media_data.get('caption')  # Optional caption with media
+            media_type = message_type
+            # Use caption as text if provided
+            text_body = caption if caption else f"[{message_type} received]"
         
         # Extract sender name
         sender_name = None
@@ -226,6 +240,10 @@ def parse_whatsapp_message(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             'timestamp': timestamp,
             'message_type': message_type,
             'text': text_body,
+            'media_id': media_id,
+            'media_type': media_type,
+            'media_mime_type': media_mime_type,
+            'caption': caption,
             'business_phone_id': metadata.get('phone_number_id'),
             'raw_payload': message  # For debugging
         }
@@ -299,6 +317,24 @@ def parse_instagram_message(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]
         timestamp = event.get('timestamp')
         text_body = message.get('text')
         
+        # Extract media information
+        media_id = None
+        media_type = None
+        media_url = None
+        
+        attachments = message.get('attachments', [])
+        if attachments:
+            attachment = attachments[0]
+            media_type = attachment.get('type')  # 'image', 'video', 'file', etc.
+            payload_data = attachment.get('payload', {})
+            media_url = payload_data.get('url')  # Direct URL for Instagram
+            # For Instagram, use URL as media_id if provided
+            if media_url:
+                media_id = media_url
+            # Use attachment caption as text if no text provided
+            if not text_body:
+                text_body = f"[{media_type} received]" if media_type else "[attachment received]"
+        
         parsed_message = {
             'platform': 'instagram',
             'sender_id': f'ig_{sender_psid}',  # Prefix for buyer_id format
@@ -306,10 +342,13 @@ def parse_instagram_message(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]
             'sender_name': None,  # Instagram doesn't provide name in webhook
             'message_id': message_id,
             'timestamp': timestamp,
-            'message_type': 'text',
+            'message_type': 'attachment' if attachments else 'text',
             'text': text_body,
+            'media_id': media_id,
+            'media_type': media_type,
+            'media_url': media_url,  # Instagram provides direct URL
             'page_id': entry[0].get('id'),
-            'raw_payload': event
+            'raw_payload': event  # For debugging
         }
         
         logger.info(
@@ -331,29 +370,51 @@ def extract_ceo_id_from_metadata(parsed_message: Dict[str, Any]) -> str:
     """
     Extract CEO ID from webhook message metadata for multi-tenancy.
     
-    In production, this would:
-    1. Look up which CEO owns the WhatsApp Business Phone Number or Instagram Page
-    2. Map business_phone_id/page_id to ceo_id in database
-    
-    For now, we'll use a default or extract from environment.
+    Maps WhatsApp Business Phone Number ID or Instagram Page ID to CEO ID
+    by looking up the business account ownership in the database.
     
     Args:
-        parsed_message: Parsed message dict
+        parsed_message: Parsed message dict with phone_number_id or page_id
     
     Returns:
         str: CEO ID for this business
     """
-    # TODO: Implement database lookup
-    # Query: SELECT ceo_id FROM business_accounts WHERE phone_id = ? OR page_id = ?
+    try:
+        from ceo_service.database import get_ceo_by_phone_id, get_ceo_by_page_id
+        
+        platform = parsed_message.get('platform')
+        
+        if platform == 'whatsapp':
+            phone_number_id = parsed_message.get('phone_number_id')
+            if phone_number_id:
+                # Look up which CEO owns this WhatsApp Business phone
+                ceo = get_ceo_by_phone_id(phone_number_id)
+                if ceo:
+                    logger.info(f"Mapped WhatsApp phone {phone_number_id} to CEO {ceo.get('ceo_id')}")
+                    return ceo.get('ceo_id')
+        
+        elif platform == 'instagram':
+            page_id = parsed_message.get('page_id')
+            if page_id:
+                # Look up which CEO owns this Instagram Page
+                ceo = get_ceo_by_page_id(page_id)
+                if ceo:
+                    logger.info(f"Mapped Instagram page {page_id} to CEO {ceo.get('ceo_id')}")
+                    return ceo.get('ceo_id')
+        
+        # Fallback to default CEO (for development or single-CEO deployments)
+        default_ceo = getattr(settings, 'DEFAULT_CEO_ID', 'ceo_dev_default')
+        logger.warning(
+            f"Could not map {platform} account to CEO, using default: {default_ceo}",
+            extra={'platform': platform, 'phone_id': parsed_message.get('phone_number_id'), 'page_id': parsed_message.get('page_id')}
+        )
+        return default_ceo
     
-    # For development, use default CEO from settings or hardcode
-    default_ceo = getattr(settings, 'DEFAULT_CEO_ID', 'ceo_dev_default')
-    
-    logger.debug(
-        f"Using CEO ID: {default_ceo} for platform: {parsed_message.get('platform')}"
-    )
-    
-    return default_ceo
+    except Exception as e:
+        # Fallback on error
+        logger.error(f"Error extracting CEO ID: {str(e)}")
+        default_ceo = getattr(settings, 'DEFAULT_CEO_ID', 'ceo_dev_default')
+        return default_ceo
 
 
 async def process_webhook_message(

@@ -37,37 +37,6 @@ OTP_TTL = 300  # 5 minutes
 OTP_LENGTH = 6  # 6 characters (digits + symbols)
 
 
-# ==================== Password Hashing ====================
-
-def hash_password(password: str) -> str:
-    """
-    Hash password using bcrypt.
-    
-    Args:
-        password: Plain text password
-    
-    Returns:
-        Bcrypt hash string
-    """
-    salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
-    return hashed.decode('utf-8')
-
-
-def verify_password(password: str, password_hash: str) -> bool:
-    """
-    Verify password against bcrypt hash.
-    
-    Args:
-        password: Plain text password
-        password_hash: Stored bcrypt hash
-    
-    Returns:
-        True if password matches, False otherwise
-    """
-    return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
-
-
 # ==================== OTP Generation ====================
 
 def generate_ceo_otp() -> str:
@@ -143,21 +112,20 @@ def verify_ceo_otp(ceo_id: str, submitted_otp: str) -> bool:
 
 
 
-# ==================== CEO Registration ====================
+# ==================== CEO Registration (OTP-Based - Zero Trust) ====================
 
-def register_ceo(name: str, email: str, phone: str, password: str, company_name: str = None) -> Dict[str, Any]:
+def register_ceo(name: str, email: str, phone: str, company_name: str = None) -> Dict[str, Any]:
     """
-    Register a new CEO account.
+    Register a new CEO account with OTP verification (Zero Trust).
     
     Args:
         name: CEO full name
         email: CEO email (unique identifier)
         phone: CEO phone number (Nigerian format)
-        password: Plain text password (will be hashed)
         company_name: Optional company/business name
     
     Returns:
-        Created CEO record (without password_hash)
+        Created CEO record with OTP sent status
     
     Raises:
         ValueError: If email already exists
@@ -168,21 +136,32 @@ def register_ceo(name: str, email: str, phone: str, password: str, company_name:
         logger.warning("CEO registration failed - email exists", extra={"email": email})
         raise ValueError("Email already registered")
     
-    # Validate password strength (basic check)
-    if len(password) < 8:
-        raise ValueError("Password must be at least 8 characters")
-    
-    # Hash password
-    password_hash = hash_password(password)
-    
-    # Create CEO record
+    # Create CEO record (no password)
     ceo_record = create_ceo(
         name=name,
         email=email,
         phone=phone,
-        password_hash=password_hash,
         company_name=company_name
     )
+    
+    # Generate and send OTP
+    otp = generate_ceo_otp()
+    store_ceo_otp(ceo_record["ceo_id"], otp)
+    
+    # Send OTP via SMS and Email
+    try:
+        from common.config import settings
+        import boto3
+        
+        # Send via SMS
+        sns = boto3.client('sns', region_name=settings.AWS_REGION)
+        sms_message = f"TrustGuard CEO Registration: Your OTP is {otp}. Valid for 5 minutes."
+        sns.publish(PhoneNumber=phone, Message=sms_message)
+        
+        # TODO: Send via Email (AWS SES)
+        logger.info(f"CEO OTP sent via SMS/Email", extra={"ceo_id": ceo_record["ceo_id"], "phone": phone, "email": email})
+    except Exception as e:
+        logger.warning(f"Failed to send CEO OTP: {e}", extra={"ceo_id": ceo_record["ceo_id"]})
     
     # Log creation
     write_audit_log(
@@ -192,20 +171,17 @@ def register_ceo(name: str, email: str, phone: str, password: str, company_name:
         details={"email": email, "company_name": company_name}
     )
     
-    logger.info("CEO registered", extra={
+    logger.info("CEO registered with OTP", extra={
         "ceo_id": ceo_record["ceo_id"],
         "email": email,
         "company_name": company_name
     })
     
-    # Remove sensitive data before returning
-    ceo_record.pop("password_hash", None)
     return ceo_record
 
 
-# ==================== CEO Authentication ====================
-
-def authenticate_ceo(email: str, password: str) -> Dict[str, Any]:
+# ==================== CEO Authentication (REMOVED - Use auth_service OTP flow) ====================
+# authenticate_ceo() removed - CEOs now authenticate via auth_service OTP endpoints
     """
     Authenticate CEO and generate JWT token.
     
@@ -377,46 +353,53 @@ def update_ceo_profile(
     return updated_ceo
 
 
-# ==================== Vendor Management ====================
+# ==================== Vendor Management (OTP-Based - Zero Trust) ====================
 
-def onboard_vendor(ceo_id: str, name: str, email: str, phone: str, password: str = None) -> Dict[str, Any]:
+def onboard_vendor(ceo_id: str, name: str, email: str, phone: str) -> Dict[str, Any]:
     """
-    Onboard a new vendor (created by CEO).
+    Onboard a new vendor (created by CEO) with OTP-based authentication.
     
     Args:
         ceo_id: CEO identifier (who is creating the vendor)
         name: Vendor name
         email: Vendor email
         phone: Vendor phone number
-        password: Optional password (auto-generated if not provided)
     
     Returns:
-        Created vendor record with temporary credentials
+        Created vendor record with OTP sent status
     """
     # Verify CEO exists
     ceo = get_ceo_by_id(ceo_id)
     if not ceo:
         raise ValueError("CEO not found")
     
-    # Generate password if not provided
-    if not password:
-        password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
-    
-    # Hash password
-    password_hash = hash_password(password)
-    
-    # Create vendor
+    # Create vendor (no password)
     vendor_data = {
         "name": name,
         "email": email.lower(),
         "phone": phone,
-        "password_hash": password_hash,
         "ceo_id": ceo_id,  # Multi-tenancy
         "created_by": ceo_id,
-        "verified": True,  # Vendors are pre-verified by CEO
+        "verified": False,  # Will be verified via OTP on first login
     }
     
     vendor_id = create_vendor(vendor_data)
+    
+    # Generate and send OTP for first login
+    from auth_service.otp_manager import generate_otp, store_otp
+    otp = generate_otp(role="Vendor")
+    store_otp(vendor_id, otp, role="Vendor")
+    
+    # Send OTP to vendor (via SMS to phone)
+    try:
+        from common.config import settings
+        import boto3
+        sns = boto3.client('sns', region_name=settings.AWS_REGION)
+        message = f"Welcome to TrustGuard! Your vendor account has been created. Use this OTP to login: {otp}. Valid for 5 minutes."
+        sns.publish(PhoneNumber=phone, Message=message)
+        logger.info(f"Vendor OTP sent via SMS", extra={"vendor_id": vendor_id, "phone": phone})
+    except Exception as e:
+        logger.warning(f"Failed to send vendor OTP via SMS: {e}", extra={"vendor_id": vendor_id})
     
     # Log vendor creation
     write_audit_log(
@@ -426,7 +409,7 @@ def onboard_vendor(ceo_id: str, name: str, email: str, phone: str, password: str
         details={"vendor_id": vendor_id, "vendor_email": email}
     )
     
-    logger.info("Vendor onboarded", extra={
+    logger.info("Vendor onboarded with OTP", extra={
         "ceo_id": ceo_id,
         "vendor_id": vendor_id,
         "vendor_email": email
@@ -434,12 +417,10 @@ def onboard_vendor(ceo_id: str, name: str, email: str, phone: str, password: str
     
     # Get created vendor
     vendor = get_vendor_by_id(vendor_id)
-    if vendor:
-        vendor.pop("password_hash", None)
     
     return {
         "vendor": vendor,
-        "temporary_password": password  # Return for CEO to share with vendor
+        "message": "Vendor onboarded successfully. OTP sent to vendor's phone for first login."
     }
 
 

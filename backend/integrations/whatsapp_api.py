@@ -23,6 +23,7 @@ Setup:
 
 import httpx
 import json
+import io
 from typing import Dict, Any, Optional
 from common.logger import logger
 from common.config import settings
@@ -419,6 +420,120 @@ Need help? We're here! 💬"""
         except Exception as e:
             logger.error(f"WhatsApp interactive send failed: {str(e)}")
             return {'success': False, 'error': str(e)}
+    
+    async def get_media_url(self, media_id: str) -> Optional[str]:
+        """
+        Get media URL from WhatsApp media ID.
+        
+        Args:
+            media_id: WhatsApp media ID from webhook payload
+        
+        Returns:
+            Media download URL (valid for 5 minutes) or None if error
+        
+        Example:
+            >>> url = await get_media_url("1234567890abcdef")
+            >>> print(url)
+            "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=xxx"
+        """
+        media_url = f"https://graph.facebook.com/v18.0/{media_id}"
+        
+        headers = {
+            "Authorization": f"Bearer {self.access_token}"
+        }
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    media_url,
+                    headers=headers,
+                    timeout=10.0
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    download_url = result.get('url')
+                    mime_type = result.get('mime_type')
+                    file_size = result.get('file_size', 0)
+                    
+                    logger.info(
+                        "WhatsApp media URL retrieved",
+                        extra={
+                            'media_id': media_id,
+                            'mime_type': mime_type,
+                            'file_size_bytes': file_size
+                        }
+                    )
+                    
+                    return download_url
+                else:
+                    error_data = response.json()
+                    logger.error(
+                        f"WhatsApp media URL error: {response.status_code}",
+                        extra={'error': error_data, 'media_id': media_id}
+                    )
+                    return None
+        
+        except Exception as e:
+            logger.error(f"WhatsApp get_media_url failed: {str(e)}", extra={'media_id': media_id})
+            return None
+    
+    async def download_media(self, media_url: str) -> Optional[bytes]:
+        """
+        Download media file from WhatsApp media URL.
+        
+        Args:
+            media_url: Media download URL (from get_media_url)
+        
+        Returns:
+            Media file bytes or None if error
+        
+        Note: 
+            - Media URLs expire after 5 minutes
+            - Max file size: 16MB for images, 64MB for videos
+            - Supported formats: JPG, PNG, PDF, MP4, etc.
+        
+        Example:
+            >>> url = await get_media_url(media_id)
+            >>> file_data = await download_media(url)
+            >>> # Upload to S3...
+        """
+        headers = {
+            "Authorization": f"Bearer {self.access_token}"
+        }
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    media_url,
+                    headers=headers,
+                    timeout=30.0,  # Longer timeout for large files
+                    follow_redirects=True
+                )
+                
+                if response.status_code == 200:
+                    media_bytes = response.content
+                    file_size_mb = len(media_bytes) / (1024 * 1024)
+                    
+                    logger.info(
+                        "WhatsApp media downloaded",
+                        extra={
+                            'file_size_mb': round(file_size_mb, 2),
+                            'content_type': response.headers.get('content-type')
+                        }
+                    )
+                    
+                    return media_bytes
+                else:
+                    logger.error(
+                        f"WhatsApp media download error: {response.status_code}",
+                        extra={'url': media_url[:50]}
+                    )
+                    return None
+        
+        except Exception as e:
+            logger.error(f"WhatsApp download_media failed: {str(e)}")
+            return None
 
 
 # Singleton instance

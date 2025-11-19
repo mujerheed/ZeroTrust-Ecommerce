@@ -35,15 +35,14 @@ def generate_ceo_id() -> str:
     return f"ceo_{timestamp}_{unique_id}"
 
 
-def create_ceo(name: str, email: str, phone: str, password_hash: str, company_name: str = None) -> Dict[str, Any]:
+def create_ceo(name: str, email: str, phone: str, company_name: str = None) -> Dict[str, Any]:
     """
-    Create a new CEO account in Users table.
+    Create a new CEO account in Users table (OTP-based auth - Zero Trust).
     
     Args:
         name: CEO full name
         email: CEO email (unique identifier)
         phone: CEO phone number (Nigerian format)
-        password_hash: Hashed password (bcrypt)
         company_name: Optional company/business name
     
     Returns:
@@ -58,9 +57,8 @@ def create_ceo(name: str, email: str, phone: str, password_hash: str, company_na
         "name": name,
         "email": email.lower(),
         "phone": phone,
-        "password_hash": password_hash,
         "company_name": company_name or f"{name}'s Business",
-        "verified": True,  # CEOs are verified upon registration
+        "verified": False,  # Will be verified via OTP
         "created_at": int(time.time()),
         "updated_at": int(time.time()),
     }
@@ -104,6 +102,58 @@ def get_ceo_by_email(email: str) -> Optional[Dict[str, Any]]:
         ExpressionAttributeValues={
             ":email": email.lower(),
             ":role": "CEO"
+        }
+    )
+    
+    items = resp.get("Items", [])
+    return items[0] if items else None
+
+
+def get_ceo_by_phone_id(whatsapp_phone_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve CEO record by WhatsApp Business Phone Number ID.
+    
+    This maps a WhatsApp Business Phone Number (from webhook metadata) to the CEO
+    who owns that business account. Used for multi-tenancy routing.
+    
+    Args:
+        whatsapp_phone_id: WhatsApp Business Phone Number ID from Meta
+    
+    Returns:
+        CEO record or None if not found
+    """
+    resp = USERS_TABLE.scan(
+        FilterExpression="#role = :role AND whatsapp_phone_id = :phone_id",
+        ExpressionAttributeNames={"#role": "role"},
+        ExpressionAttributeValues={
+            ":role": "CEO",
+            ":phone_id": whatsapp_phone_id
+        }
+    )
+    
+    items = resp.get("Items", [])
+    return items[0] if items else None
+
+
+def get_ceo_by_page_id(instagram_page_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve CEO record by Instagram-connected Facebook Page ID.
+    
+    This maps an Instagram Page ID (from webhook metadata) to the CEO
+    who owns that Instagram business account. Used for multi-tenancy routing.
+    
+    Args:
+        instagram_page_id: Instagram Page ID from Meta
+    
+    Returns:
+        CEO record or None if not found
+    """
+    resp = USERS_TABLE.scan(
+        FilterExpression="#role = :role AND instagram_page_id = :page_id",
+        ExpressionAttributeNames={"#role": "role"},
+        ExpressionAttributeValues={
+            ":role": "CEO",
+            ":page_id": instagram_page_id
         }
     )
     

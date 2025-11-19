@@ -20,6 +20,7 @@ Features:
 """
 
 import re
+import time
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
 from common.logger import logger
@@ -49,6 +50,35 @@ class ChatbotRouter:
     def __init__(self):
         self.whatsapp = whatsapp_api
         self.instagram = instagram_api
+    
+    async def handle_message(self, parsed_message: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Main entry point for handling incoming messages from webhooks.
+        
+        Extracts CEO ID from message metadata and routes to appropriate handler.
+        
+        Args:
+            parsed_message: Parsed message dict from webhook_handler
+        
+        Returns:
+            Dict with routing result
+        """
+        from integrations.webhook_handler import extract_ceo_id_from_metadata
+        
+        # Extract CEO ID for multi-tenancy routing
+        ceo_id = extract_ceo_id_from_metadata(parsed_message)
+        
+        logger.info(
+            "Processing message",
+            extra={
+                'platform': parsed_message.get('platform'),
+                'sender': parsed_message.get('sender_id'),
+                'ceo_id': ceo_id
+            }
+        )
+        
+        # Route to intent handler
+        return await self.route_message(parsed_message, ceo_id)
     
     def get_customized_response(
         self,
@@ -169,7 +199,7 @@ class ChatbotRouter:
         ceo_id: str
     ) -> Dict[str, Any]:
         """
-        Route message to appropriate handler based on intent.
+        Route message to appropriate handler based on intent and conversation state.
         
         Args:
             parsed_message: Parsed message dict from webhook_handler
@@ -178,20 +208,65 @@ class ChatbotRouter:
         Returns:
             Dict with response and action taken
         """
+        from integrations.conversation_state import conversation_state
+        
         sender_id = parsed_message['sender_id']
         text = parsed_message.get('text', '').strip()
         platform = parsed_message['platform']
+        media_id = parsed_message.get('media_id')
+        media_type = parsed_message.get('media_type')
+        media_url = parsed_message.get('media_url')  # Instagram provides direct URL
         
         logger.info(
             f"Routing message from {platform}",
             extra={
                 'sender': sender_id,
                 'text_preview': text[:50] if text else None,
+                'has_media': bool(media_id or media_url),
+                'media_type': media_type,
                 'ceo_id': ceo_id
             }
         )
         
-        # Detect intent
+        # Handle media uploads (receipt images/videos) first
+        if media_id or media_url:
+            logger.info(f"Media detected: {media_type}", extra={'sender': sender_id})
+            # Auto-download and process media
+            download_result = await self.handle_media_download(
+                sender_id, platform, media_id, media_url, media_type, ceo_id
+            )
+            # Continue processing text/caption if present
+            if not text or text.startswith('['):
+                # No caption or auto-generated text, just acknowledge upload
+                return download_result
+        
+        # Check if buyer is in active conversation flow
+        current_state = conversation_state.get_state(sender_id)
+        
+        if current_state:
+            # Handle conversation flow continuation
+            state_name = current_state.get('state')
+            logger.info(f"Buyer {sender_id} in conversation state: {state_name}")
+            
+            # Check for interruptions (cancel, help)
+            if text.lower() in ['cancel', 'stop', 'quit']:
+                return await self.handle_cancel_conversation(sender_id, platform, ceo_id)
+            elif text.lower() in ['help', '?']:
+                return await self.handle_help(sender_id, platform, ceo_id)
+            
+            # Route based on current state
+            if state_name == 'waiting_for_name':
+                return await self.handle_name_collection(sender_id, text, platform, ceo_id)
+            elif state_name == 'waiting_for_address':
+                return await self.handle_address_collection(sender_id, text, platform, ceo_id)
+            elif state_name == 'waiting_for_phone':
+                return await self.handle_phone_collection(sender_id, text, platform, ceo_id)
+            elif state_name == 'waiting_for_otp':
+                return await self.handle_otp_verification(sender_id, text, platform, ceo_id)
+            elif state_name == 'pending_address_confirmation':
+                return await self.handle_address_confirmation_response(sender_id, text, platform, ceo_id)
+        
+        # No active conversation - detect intent from message
         intent, value = self.detect_intent(text)
         
         logger.debug(f"Detected intent: {intent}, value: {value}")
@@ -236,13 +311,18 @@ class ChatbotRouter:
         parsed_message: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Handle buyer registration flow.
+        Handle buyer registration flow with multi-turn conversation.
         
-        Flow:
-        1. Check if buyer already exists
-        2. If not, create buyer record
-        3. Generate OTP
-        4. Send welcome message + OTP
+        Flow (WhatsApp):
+        1. Greet buyer → Ask for name
+        2. Store name → Ask for address
+        3. Store address → Send OTP for phone verification
+        
+        Flow (Instagram):
+        1. Greet buyer → Ask for name
+        2. Store name → Ask for address
+        3. Store address → Ask for phone
+        4. Store phone → Send OTP for verification
         
         Args:
             sender_id: Buyer ID (wa_* or ig_*)
@@ -253,12 +333,14 @@ class ChatbotRouter:
         Returns:
             Dict with action result
         """
+        from integrations.conversation_state import conversation_state
+        
         try:
             # Check if buyer exists
             existing_buyer = get_buyer_by_id(sender_id)
             
             if existing_buyer:
-                # Buyer already registered
+                # Buyer already registered - just send OTP
                 logger.info(f"Existing buyer: {sender_id}")
                 
                 # Generate new OTP
@@ -279,32 +361,14 @@ class ChatbotRouter:
                 }
             
             else:
-                # New buyer - create account
-                logger.info(f"Registering new buyer: {sender_id}")
+                # New buyer - start multi-turn registration
+                logger.info(f"Starting multi-turn registration for: {sender_id}")
                 
-                # Extract buyer details
-                sender_phone = parsed_message.get('sender_phone')
-                sender_name = parsed_message.get('sender_name', 'Customer')
+                # Get sender name from message (if available)
+                sender_name = parsed_message.get('sender_name', 'there')
                 
-                # Create buyer record with basic info
-                # Note: Address will be collected later (during order placement or via follow-up)
-                create_buyer(
-                    buyer_id=sender_id,
-                    phone=sender_phone,
-                    platform=platform,
-                    ceo_id=ceo_id,
-                    name=sender_name,
-                    delivery_address=None,  # Will be collected later
-                    email=None,  # Optional, can be added later
-                    meta=parsed_message.get('meta')
-                )
-                
-                # Generate OTP
-                otp = generate_otp('Buyer')
-                store_otp(sender_id, otp, 'Buyer')
-                
-                # Get customized welcome message from CEO settings
-                default_welcome = f"Hi {sender_name}! 👋\n\nThank you for choosing TrustGuard! 🛡️\n\nWe're here to make your online shopping safe and secure."
+                # Get customized welcome message
+                default_welcome = f"Hi {sender_name}! 👋\n\nWelcome to TrustGuard! 🛡️\n\nLet's get you set up."
                 welcome_message = self.get_customized_response(
                     ceo_id=ceo_id,
                     response_type='welcome',
@@ -312,29 +376,35 @@ class ChatbotRouter:
                     user_name=sender_name
                 )
                 
-                # Send customized welcome message + OTP
-                if platform == 'whatsapp':
-                    await self.whatsapp.send_message(sender_id, welcome_message)
-                    await self.whatsapp.send_otp(sender_id, otp)
-                else:
-                    await self.instagram.send_message(sender_id, welcome_message)
-                    await self.instagram.send_otp(sender_id, otp)
+                # Ask for name
+                name_prompt = "\n\nWhat's your full name? 👤"
                 
-                logger.info(
-                    "Buyer registered successfully",
-                    extra={
-                        'buyer_id': sender_id,
-                        'platform': platform,
-                        'ceo_id': ceo_id
-                    }
+                # Send welcome + name prompt
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, welcome_message + name_prompt)
+                else:
+                    await self.instagram.send_message(sender_id, name_prompt)
+                
+                # Save conversation state
+                conversation_state.save_state(
+                    buyer_id=sender_id,
+                    state='waiting_for_name',
+                    context={
+                        'platform_name': sender_name,  # Name from WhatsApp/Instagram profile
+                        'started_at': int(time.time())
+                    },
+                    ceo_id=ceo_id,
+                    platform=platform
                 )
                 
+                logger.info(f"Conversation state saved: waiting_for_name for {sender_id}")
+                
                 return {
-                    'action': 'registered',
+                    'action': 'registration_started',
                     'buyer_id': sender_id,
                     'is_new': True,
                     'platform': platform,
-                    'otp_sent': True
+                    'state': 'waiting_for_name'
                 }
         
         except Exception as e:
@@ -471,17 +541,59 @@ Type 'register' to request a new code"""
                 await self.instagram.send_message(sender_id, msg)
             return {'action': 'feature_disabled', 'feature': 'order_tracking', 'platform': platform}
         
-        # TODO: Implement order status lookup from database
+        # Look up order from database
         logger.info(f"Order status request: {order_id} from {sender_id}")
         
-        # Placeholder response
-        msg = f"""📦 Order Status
+        try:
+            from order_service.database import get_order_by_id
+            order = get_order_by_id(order_id)
+            
+            if not order:
+                msg = f"""❌ Order Not Found
 
 Order ID: {order_id}
 
-This feature is coming soon!
+We couldn't find this order. Please check the order ID and try again.
 
-For now, please contact your vendor directly for order updates.
+Type 'help' for other commands"""
+            elif order.get('buyer_id') != sender_id:
+                # Security: Buyer can only view their own orders
+                msg = """🔒 Access Denied
+
+You can only view orders you placed.
+
+Type 'help' for other commands"""
+            else:
+                # Format order status message
+                status = order.get('status', 'unknown')
+                amount = order.get('total_amount', 0)
+                created = order.get('created_at', '')
+                
+                status_emoji = {
+                    'pending': '⏳',
+                    'confirmed': '✅',
+                    'paid': '💰',
+                    'verified': '🔐',
+                    'shipped': '📦',
+                    'delivered': '🎉',
+                    'cancelled': '❌'
+                }.get(status, '📋')
+                
+                msg = f"""{status_emoji} Order Status
+
+Order ID: {order_id}
+Status: {status.upper()}
+Amount: ₦{amount:,.2f}
+
+Need help? Type 'help' for commands"""
+        
+        except Exception as e:
+            logger.error(f"Error fetching order: {str(e)}")
+            msg = f"""⚠️ Error Checking Order
+
+We had trouble looking up order {order_id}.
+
+Please try again later or contact your vendor.
 
 Type 'help' for other commands"""
         
@@ -547,6 +659,768 @@ Type 'help' for other commands"""
             'action': 'upload_info',
             'platform': platform
         }
+    
+    # ========== Multi-Turn Conversation Handlers ==========
+    
+    async def handle_name_collection(
+        self,
+        sender_id: str,
+        text: str,
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle name collection step in registration flow.
+        
+        Args:
+            sender_id: Buyer ID
+            text: User's response (their name)
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with result
+        """
+        from integrations.conversation_state import conversation_state, ConversationFlow
+        
+        try:
+            # Validate name (at least 2 characters)
+            name = text.strip()
+            if len(name) < 2:
+                error_msg = "Please enter your full name (at least 2 characters)."
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, error_msg)
+                else:
+                    await self.instagram.send_message(sender_id, error_msg)
+                return {'action': 'invalid_name', 'buyer_id': sender_id}
+            
+            # Update conversation state with name
+            conversation_state.update_state(
+                buyer_id=sender_id,
+                new_state='waiting_for_address',
+                context_updates={'name': name}
+            )
+            
+            # Ask for address
+            address_prompt = f"Thanks, {name}! 📍\n\nWhat's your delivery address?"
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, address_prompt)
+            else:
+                await self.instagram.send_message(sender_id, address_prompt)
+            
+            logger.info(f"Name collected for {sender_id}: {name}")
+            
+            return {
+                'action': 'name_collected',
+                'buyer_id': sender_id,
+                'name': name,
+                'next_state': 'waiting_for_address'
+            }
+        
+        except Exception as e:
+            logger.error(f"Name collection error: {str(e)}")
+            return {'action': 'error', 'error': str(e)}
+    
+    async def handle_address_collection(
+        self,
+        sender_id: str,
+        text: str,
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle address collection step in registration flow.
+        
+        Args:
+            sender_id: Buyer ID
+            text: User's response (their address)
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with result
+        """
+        from integrations.conversation_state import conversation_state, ConversationFlow
+        
+        try:
+            # Validate address (at least 10 characters)
+            address = text.strip()
+            if len(address) < 10:
+                error_msg = "Please provide a complete delivery address (at least 10 characters).\n\nExample: 123 Ikeja Road, Lagos"
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, error_msg)
+                else:
+                    await self.instagram.send_message(sender_id, error_msg)
+                return {'action': 'invalid_address', 'buyer_id': sender_id}
+            
+            # Get current state to retrieve name
+            state = conversation_state.get_state(sender_id)
+            name = state.get('context', {}).get('name', 'Customer')
+            
+            # Platform-specific flow
+            if platform == 'whatsapp':
+                # WhatsApp: Phone auto-detected, proceed to create buyer
+                phone = state.get('context', {}).get('platform_phone', '')
+                
+                # Create buyer record
+                create_buyer(
+                    buyer_id=sender_id,
+                    phone=phone,
+                    platform=platform,
+                    ceo_id=ceo_id,
+                    name=name,
+                    delivery_address=address,
+                    email=None,
+                    meta={}
+                )
+                
+                # Generate OTP
+                otp = generate_otp('Buyer')
+                store_otp(sender_id, otp, 'Buyer')
+                
+                # Send OTP
+                await self.whatsapp.send_otp(sender_id, otp)
+                
+                # Update state to waiting for OTP
+                conversation_state.update_state(
+                    buyer_id=sender_id,
+                    new_state='waiting_for_otp',
+                    context_updates={'address': address, 'phone': phone}
+                )
+                
+                logger.info(f"Buyer created (WhatsApp): {sender_id}, OTP sent")
+                
+                return {
+                    'action': 'otp_sent',
+                    'buyer_id': sender_id,
+                    'platform': platform,
+                    'next_state': 'waiting_for_otp'
+                }
+            
+            else:
+                # Instagram: Need to ask for phone number
+                conversation_state.update_state(
+                    buyer_id=sender_id,
+                    new_state='waiting_for_phone',
+                    context_updates={'address': address}
+                )
+                
+                phone_prompt = "Great! 📱\n\nWhat's your phone number? (Include country code, e.g., +2348012345678)"
+                await self.instagram.send_message(sender_id, phone_prompt)
+                
+                logger.info(f"Address collected for {sender_id}, asking for phone")
+                
+                return {
+                    'action': 'address_collected',
+                    'buyer_id': sender_id,
+                    'address': address,
+                    'next_state': 'waiting_for_phone'
+                }
+        
+        except Exception as e:
+            logger.error(f"Address collection error: {str(e)}")
+            return {'action': 'error', 'error': str(e)}
+    
+    async def handle_phone_collection(
+        self,
+        sender_id: str,
+        text: str,
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle phone number collection step (Instagram only).
+        
+        Args:
+            sender_id: Buyer ID
+            text: User's response (their phone number)
+            platform: 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with result
+        """
+        from integrations.conversation_state import conversation_state
+        from auth_service.utils import validate_phone_number
+        
+        try:
+            # Validate phone number
+            phone = text.strip()
+            try:
+                validate_phone_number(phone)
+            except ValueError as e:
+                error_msg = f"Invalid phone number: {str(e)}\n\nPlease provide a valid Nigerian phone number (+234...)."
+                await self.instagram.send_message(sender_id, error_msg)
+                return {'action': 'invalid_phone', 'buyer_id': sender_id}
+            
+            # Get current state to retrieve name and address
+            state = conversation_state.get_state(sender_id)
+            context = state.get('context', {})
+            name = context.get('name', 'Customer')
+            address = context.get('address', '')
+            
+            # Create buyer record
+            create_buyer(
+                buyer_id=sender_id,
+                phone=phone,
+                platform=platform,
+                ceo_id=ceo_id,
+                name=name,
+                delivery_address=address,
+                email=None,
+                meta={}
+            )
+            
+            # Generate OTP
+            otp = generate_otp('Buyer')
+            store_otp(sender_id, otp, 'Buyer')
+            
+            # Send OTP
+            await self.instagram.send_otp(sender_id, otp)
+            
+            # Update state to waiting for OTP
+            conversation_state.update_state(
+                buyer_id=sender_id,
+                new_state='waiting_for_otp',
+                context_updates={'phone': phone}
+            )
+            
+            logger.info(f"Buyer created (Instagram): {sender_id}, OTP sent")
+            
+            return {
+                'action': 'otp_sent',
+                'buyer_id': sender_id,
+                'platform': platform,
+                'next_state': 'waiting_for_otp'
+            }
+        
+        except Exception as e:
+            logger.error(f"Phone collection error: {str(e)}")
+            return {'action': 'error', 'error': str(e)}
+    
+    async def handle_cancel_conversation(
+        self,
+        sender_id: str,
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle conversation cancellation (user types 'cancel').
+        
+        Args:
+            sender_id: Buyer ID
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with result
+        """
+        from integrations.conversation_state import conversation_state
+        
+        try:
+            # Delete conversation state
+            conversation_state.delete_state(sender_id)
+            
+            cancel_msg = """❌ Registration Cancelled
+
+No problem! You can start over anytime.
+
+Type 'register' to begin again, or 'help' for assistance."""
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, cancel_msg)
+            else:
+                await self.instagram.send_message(sender_id, cancel_msg)
+            
+            logger.info(f"Conversation cancelled for {sender_id}")
+            
+            return {
+                'action': 'conversation_cancelled',
+                'buyer_id': sender_id,
+                'platform': platform
+            }
+        
+        except Exception as e:
+            logger.error(f"Cancel conversation error: {str(e)}")
+            return {'action': 'error', 'error': str(e)}
+    
+    # ========== End Multi-Turn Handlers ==========
+    
+    async def handle_media_download(
+        self,
+        sender_id: str,
+        platform: str,
+        media_id: Optional[str],
+        media_url: Optional[str],
+        media_type: Optional[str],
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Auto-download and store receipt media (images/videos) to S3.
+        
+        Args:
+            sender_id: Buyer ID
+            platform: 'whatsapp' or 'instagram'
+            media_id: WhatsApp media ID or Instagram media URL
+            media_url: Direct media URL (Instagram) or None (WhatsApp)
+            media_type: 'image', 'video', 'document', etc.
+            ceo_id: CEO ID for S3 path
+        
+        Returns:
+            Dict with upload result
+        """
+        from common.db_connection import get_s3_client
+        from common.config import settings
+        import uuid
+        from datetime import datetime
+        
+        try:
+            # Download media based on platform
+            media_bytes = None
+            
+            if platform == 'whatsapp':
+                # Step 1: Get media URL from media ID
+                download_url = await self.whatsapp.get_media_url(media_id)
+                if not download_url:
+                    error_msg = "❌ Failed to retrieve media. Please try again."
+                    await self.whatsapp.send_message(sender_id, error_msg)
+                    return {'action': 'media_download_failed', 'reason': 'url_retrieval_failed'}
+                
+                # Step 2: Download media content
+                media_bytes = await self.whatsapp.download_media(download_url)
+            
+            elif platform == 'instagram':
+                # Instagram provides direct URL in webhook
+                if media_url:
+                    media_bytes = await self.instagram.download_media(media_url)
+                else:
+                    # Fallback: try to get URL from media_id
+                    download_url = await self.instagram.get_media_url(media_id)
+                    if download_url:
+                        media_bytes = await self.instagram.download_media(download_url)
+            
+            if not media_bytes:
+                error_msg = "❌ Failed to download media. Please try uploading again."
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, error_msg)
+                else:
+                    await self.instagram.send_message(sender_id, error_msg)
+                return {'action': 'media_download_failed', 'reason': 'download_failed'}
+            
+            # Determine file extension from media type
+            extension_map = {
+                'image': 'jpg',
+                'video': 'mp4',
+                'document': 'pdf',
+                'audio': 'mp3'
+            }
+            file_ext = extension_map.get(media_type, 'bin')
+            
+            # Generate unique filename
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            unique_id = str(uuid.uuid4())[:8]
+            filename = f"{timestamp}_{unique_id}.{file_ext}"
+            
+            # S3 path: receipts/{ceo_id}/pending-verification/{sender_id}/{filename}
+            # (vendor_id unknown at upload time, moves to vendor folder after order creation)
+            s3_key = f"receipts/{ceo_id}/pending-verification/{sender_id}/{filename}"
+            
+            # Upload to S3
+            s3_client = get_s3_client()
+            bucket_name = getattr(settings, 'RECEIPT_BUCKET', 'trustguard-receipts')
+            
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Body=media_bytes,
+                ContentType=f"{media_type}/*" if media_type else "application/octet-stream",
+                ServerSideEncryption='AES256',
+                Metadata={
+                    'buyer_id': sender_id,
+                    'ceo_id': ceo_id,
+                    'platform': platform,
+                    'media_type': media_type or 'unknown',
+                    'upload_timestamp': timestamp
+                }
+            )
+            
+            logger.info(
+                "Receipt media uploaded to S3",
+                extra={
+                    'buyer_id': sender_id,
+                    'ceo_id': ceo_id,
+                    'platform': platform,
+                    'media_type': media_type,
+                    's3_key': s3_key,
+                    'file_size_kb': len(media_bytes) / 1024
+                }
+            )
+            
+            # Send acknowledgment to buyer
+            success_msg = f"""✅ Receipt {media_type.capitalize()} Received!
+
+Your payment proof has been securely uploaded.
+
+📁 File: {filename}
+📊 Status: Pending vendor verification
+
+You'll be notified once your order is confirmed."""
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, success_msg)
+            else:
+                await self.instagram.send_message(sender_id, success_msg)
+            
+            return {
+                'action': 'media_uploaded',
+                'buyer_id': sender_id,
+                'media_type': media_type,
+                's3_key': s3_key,
+                'filename': filename,
+                'file_size_bytes': len(media_bytes)
+            }
+        
+        except Exception as e:
+            logger.error(f"Media download error: {str(e)}", extra={'buyer_id': sender_id, 'platform': platform})
+            
+            error_msg = "❌ Upload failed due to technical error. Please try again or contact support."
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, error_msg)
+            else:
+                await self.instagram.send_message(sender_id, error_msg)
+            
+            return {'action': 'media_download_error', 'error': str(e)}
+    
+    # ========== End Media Download ==========
+    
+    async def handle_address_confirmation_response(
+        self,
+        sender_id: str,
+        text: str,
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle buyer's response to address confirmation prompt.
+        
+        Buyer can:
+        - Reply 'yes' to confirm current address
+        - Reply 'update address to <new address>' to change address
+        
+        Args:
+            sender_id: Buyer ID
+            text: Buyer's response
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with action result
+        """
+        from integrations.conversation_state import conversation_state
+        from auth_service.database import update_buyer
+        from order_service.database import update_order_status, get_order
+        import re
+        
+        try:
+            # Get conversation state to retrieve order_id
+            state = conversation_state.get_state(sender_id)
+            if not state:
+                error_msg = "❌ Session expired. Please try confirming your order again."
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, error_msg)
+                else:
+                    await self.instagram.send_message(sender_id, error_msg)
+                return {'action': 'session_expired', 'buyer_id': sender_id}
+            
+            order_id = state.get('context', {}).get('order_id')
+            current_address = state.get('context', {}).get('current_address', '')
+            
+            text_lower = text.lower().strip()
+            
+            # Check if buyer confirms current address
+            if text_lower in ['yes', 'y', 'confirm', 'correct', 'ok', 'okay']:
+                # Address confirmed - finalize order
+                updated_order = update_order_status(
+                    order_id=order_id,
+                    new_status='confirmed',
+                    notes='Confirmed by buyer via chatbot. Address verified.'
+                )
+                
+                # Clear conversation state
+                conversation_state.delete_state(sender_id)
+                
+                logger.info(f"Order {order_id} confirmed with address verification", extra={'buyer_id': sender_id})
+                
+                # Send success message
+                total = updated_order.get('total_amount', 0)
+                currency_symbol = "₦" if updated_order.get('currency') == 'NGN' else updated_order.get('currency', '')
+                
+                success_msg = f"""✅ *Order Confirmed!*
+
+📋 Order ID: `{order_id}`
+💰 Total: {currency_symbol}{total:,.2f}
+📍 Delivery: _{current_address}_
+
+Your order has been confirmed successfully. 
+
+📸 *Next Step:*
+1. Make payment to the vendor
+2. Reply with *'upload'* to submit your payment receipt
+
+Thank you for shopping with us! 🛍️"""
+                
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, success_msg)
+                else:
+                    await self.instagram.send_message(sender_id, success_msg)
+                
+                return {
+                    'action': 'order_confirmed',
+                    'order_id': order_id,
+                    'address_confirmed': True,
+                    'platform': platform
+                }
+            
+            # Check if buyer wants to update address
+            update_pattern = r'update\s+address\s+to\s+(.+)'
+            match = re.search(update_pattern, text_lower)
+            
+            if match or text_lower.startswith('update'):
+                # Extract new address
+                if match:
+                    new_address = match.group(1).strip()
+                else:
+                    # Try to extract address after "update address to" or just "update"
+                    parts = text.split(maxsplit=3)
+                    new_address = parts[-1] if len(parts) > 2 else text
+                
+                # Validate address length
+                if len(new_address) < 10:
+                    error_msg = "❌ Please provide a complete delivery address (at least 10 characters).\n\nExample: _update address to 123 New Street, Lagos_"
+                    if platform == 'whatsapp':
+                        await self.whatsapp.send_message(sender_id, error_msg)
+                    else:
+                        await self.instagram.send_message(sender_id, error_msg)
+                    return {'action': 'invalid_address', 'buyer_id': sender_id}
+                
+                # Update buyer's delivery address
+                update_buyer(sender_id, {'delivery_address': new_address})
+                
+                # Update conversation state with new address
+                conversation_state.update_state(
+                    buyer_id=sender_id,
+                    new_state='pending_address_confirmation',
+                    context_updates={'current_address': new_address}
+                )
+                
+                logger.info(f"Buyer {sender_id} updated address: {new_address}")
+                
+                # Ask for confirmation of new address
+                reconfirm_msg = f"""📍 **Address Updated**
+
+New delivery address:
+_{new_address}_
+
+Is this address correct?
+
+Reply:
+• *yes* to confirm and finalize order
+• *update address to [another address]* to change again"""
+                
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, reconfirm_msg)
+                else:
+                    await self.instagram.send_message(sender_id, reconfirm_msg)
+                
+                return {
+                    'action': 'address_updated',
+                    'buyer_id': sender_id,
+                    'new_address': new_address,
+                    'platform': platform
+                }
+            
+            # Invalid response
+            help_msg = """❓ I didn't understand that.
+
+Please reply:
+• *yes* to confirm current address
+• *update address to [new address]* to change address
+
+Example: _update address to 123 Main Street, Lagos_"""
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, help_msg)
+            else:
+                await self.instagram.send_message(sender_id, help_msg)
+            
+            return {'action': 'invalid_response', 'buyer_id': sender_id}
+        
+        except Exception as e:
+            logger.error(f"Address confirmation response error: {str(e)}", extra={'buyer_id': sender_id})
+            
+            error_msg = "❌ Failed to process response. Please try again or contact support."
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, error_msg)
+            else:
+                await self.instagram.send_message(sender_id, error_msg)
+            
+            return {'action': 'error', 'error': str(e)}
+    
+    # ========== End Address Confirmation ==========
+    
+    async def generate_and_send_order_pdf(
+        self,
+        order_id: str,
+        buyer_id: str,
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Generate PDF summary for completed order and send to buyer.
+        
+        Args:
+            order_id: Order ID
+            buyer_id: Buyer ID
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with result
+        """
+        from integrations.pdf_generator import pdf_generator
+        from order_service.database import get_order
+        from auth_service.database import get_buyer, get_user
+        from common.db_connection import get_s3_client
+        from common.config import settings
+        import uuid
+        from datetime import datetime, timedelta
+        
+        try:
+            # Fetch order details
+            order = get_order(order_id)
+            if not order:
+                logger.error(f"Order not found for PDF generation: {order_id}")
+                return {'action': 'order_not_found', 'order_id': order_id}
+            
+            # Fetch buyer details
+            buyer = get_buyer(buyer_id)
+            if not buyer:
+                logger.error(f"Buyer not found for PDF generation: {buyer_id}")
+                return {'action': 'buyer_not_found', 'buyer_id': buyer_id}
+            
+            # Fetch vendor details (optional)
+            vendor = None
+            vendor_id = order.get('vendor_id')
+            if vendor_id:
+                vendor = get_user(vendor_id)
+            
+            # Get receipt URL if available
+            receipt_url = None
+            receipts = order.get('receipts', [])
+            if receipts:
+                # Get first verified receipt S3 key
+                for receipt in receipts:
+                    if receipt.get('verified'):
+                        s3_key = receipt.get('s3_key')
+                        if s3_key:
+                            # Generate presigned URL (7 days validity)
+                            s3_client = get_s3_client()
+                            bucket_name = getattr(settings, 'RECEIPT_BUCKET', 'trustguard-receipts')
+                            receipt_url = s3_client.generate_presigned_url(
+                                'get_object',
+                                Params={'Bucket': bucket_name, 'Key': s3_key},
+                                ExpiresIn=604800  # 7 days
+                            )
+                            break
+            
+            # Generate PDF
+            pdf_bytes = pdf_generator.generate_order_pdf(
+                order=order,
+                buyer=buyer,
+                vendor=vendor,
+                receipt_url=receipt_url
+            )
+            
+            # Upload PDF to S3
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            pdf_filename = f"order_{order_id}_{timestamp}.pdf"
+            s3_key = f"invoices/{ceo_id}/{buyer_id}/{pdf_filename}"
+            
+            s3_client = get_s3_client()
+            bucket_name = getattr(settings, 'RECEIPT_BUCKET', 'trustguard-receipts')
+            
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Body=pdf_bytes,
+                ContentType='application/pdf',
+                ServerSideEncryption='AES256',
+                Metadata={
+                    'order_id': order_id,
+                    'buyer_id': buyer_id,
+                    'ceo_id': ceo_id,
+                    'generated_at': timestamp
+                }
+            )
+            
+            # Generate presigned download URL (7 days validity)
+            pdf_download_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': bucket_name, 'Key': s3_key},
+                ExpiresIn=604800  # 7 days
+            )
+            
+            logger.info(
+                "Order PDF generated and uploaded",
+                extra={
+                    'order_id': order_id,
+                    'buyer_id': buyer_id,
+                    's3_key': s3_key,
+                    'pdf_size_kb': len(pdf_bytes) / 1024
+                }
+            )
+            
+            # Send PDF download link to buyer
+            total = order.get('total_amount', 0)
+            currency = order.get('currency', 'NGN')
+            currency_symbol = "₦" if currency == 'NGN' else currency
+            
+            message = f"""🎉 *Order Complete!*
+
+Thank you for your purchase!
+
+📋 Order ID: `{order_id}`
+💰 Total: {currency_symbol}{total:,.2f}
+✅ Status: Completed
+
+📄 **Transaction Summary PDF**
+Your detailed invoice is ready for download:
+
+{pdf_download_url}
+
+_Link expires in 7 days_
+
+Thank you for choosing TrustGuard! 🛍️"""
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(buyer_id, message)
+            else:
+                await self.instagram.send_message(buyer_id, message)
+            
+            return {
+                'action': 'pdf_generated_and_sent',
+                'order_id': order_id,
+                'buyer_id': buyer_id,
+                's3_key': s3_key,
+                'download_url': pdf_download_url,
+                'pdf_size_bytes': len(pdf_bytes)
+            }
+        
+        except Exception as e:
+            logger.error(f"PDF generation error: {str(e)}", extra={'order_id': order_id, 'buyer_id': buyer_id})
+            return {'action': 'pdf_generation_error', 'error': str(e)}
+    
+    # ========== End PDF Generation ==========
     
     async def handle_help(
         self,
@@ -637,8 +1511,9 @@ TrustGuard - Your Shopping Security Partner"""
         Flow:
         1. If order_id provided, confirm that specific order
         2. If no order_id, fetch buyer's most recent pending order
-        3. Update order status to 'confirmed'
-        4. Send confirmation message
+        3. **NEW: Ask for delivery address confirmation before finalizing**
+        4. Update order status to 'confirmed'
+        5. Send confirmation message
         
         Args:
             sender_id: Buyer ID
@@ -652,6 +1527,8 @@ TrustGuard - Your Shopping Security Partner"""
         try:
             # Import here to avoid circular dependency
             from order_service.database import list_buyer_orders, update_order_status
+            from auth_service.database import get_buyer
+            from integrations.conversation_state import conversation_state
             
             # If no order_id provided, get most recent pending order
             if not order_id:
@@ -672,47 +1549,55 @@ TrustGuard - Your Shopping Security Partner"""
                 # Get most recent (first in list, sorted by created_at desc)
                 order_id = pending_orders[0].get('order_id')
             
-            # Confirm the order
-            updated_order = update_order_status(
-                order_id=order_id,
-                new_status='confirmed',
-                notes='Confirmed by buyer via chatbot'
+            # **NEW: Address Confirmation Step**
+            # Get buyer's delivery address
+            buyer = get_buyer(sender_id)
+            delivery_address = buyer.get('delivery_address', 'Not provided')
+            
+            # Save conversation state to wait for address confirmation
+            conversation_state.save_state(
+                buyer_id=sender_id,
+                state='pending_address_confirmation',
+                context={
+                    'order_id': order_id,
+                    'current_address': delivery_address
+                },
+                ceo_id=ceo_id,
+                platform=platform
             )
             
-            logger.info(f"Order {order_id} confirmed by buyer {sender_id}")
-            
-            # Send success message
-            total = updated_order.get('total_amount', 0)
-            currency_symbol = "₦" if updated_order.get('currency') == 'NGN' else updated_order.get('currency', '')
-            
-            msg = f"""✅ *Order Confirmed!*
+            # Ask buyer to confirm address
+            confirmation_msg = f"""📍 **Delivery Address Confirmation**
 
-📋 Order ID: `{order_id}`
-💰 Total: {currency_symbol}{total:,.2f}
+Current delivery address:
+_{delivery_address}_
 
-Your order has been confirmed successfully. 
+Is this address correct?
 
-📸 *Next Step:*
-1. Make payment to the vendor
-2. Reply with *'upload'* to submit your payment receipt
+Reply:
+• *yes* to confirm and proceed
+• *update address to [new address]* to change address
 
-Thank you for shopping with us! 🛍️"""
+Example: _update address to 123 New Street, Lagos_"""
             
             if platform == 'whatsapp':
-                await self.whatsapp.send_message(sender_id, msg)
+                await self.whatsapp.send_message(sender_id, confirmation_msg)
             else:
-                await self.instagram.send_message(sender_id, msg)
+                await self.instagram.send_message(sender_id, confirmation_msg)
+            
+            logger.info(f"Address confirmation requested for order {order_id}", extra={'buyer_id': sender_id})
             
             return {
-                'action': 'order_confirmed',
+                'action': 'address_confirmation_requested',
                 'order_id': order_id,
-                'platform': platform
+                'platform': platform,
+                'address': delivery_address
             }
             
         except Exception as e:
             logger.error(f"Order confirmation failed: {str(e)}")
             
-            msg = f"❌ Failed to confirm order: {str(e)}\n\n"
+            msg = f"❌ Failed to process order confirmation: {str(e)}\n\n"
             msg += "Please contact support if the issue persists."
             
             if platform == 'whatsapp':

@@ -27,14 +27,17 @@ Parameters:
 # ============================================================
 Globals:
   Function:
-    Runtime: python3.12
+    Runtime: python3.11
     MemorySize: 512
     Timeout: 30
     Environment:
       Variables:
         ENV: !Ref Environment
-        AWS_REGION: !Ref AWS::Region
         HIGH_VALUE_THRESHOLD: !Ref HighValueThreshold
+        ENVIRONMENT: !Ref Environment
+        STACK_NAME: !Ref AWS::StackName
+        META_SECRET_NAME: !Sub "/TrustGuard/${Environment}/meta-${AWS::StackName}"
+        META_WEBHOOK_VERIFY_TOKEN: "trustguard_verify_2025"
 
 # ============================================================
 # RESOURCES: Infrastructure components
@@ -103,24 +106,22 @@ Resources:
   TrustGuardSecrets:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub "/TrustGuard/${Environment}/app"
+      Name: !Sub "/TrustGuard/${Environment}/app-${AWS::StackName}"
       Description: JWT secret and application secrets
       KmsKeyId: !Ref TrustGuardKMSKey
       GenerateSecretString:
-        SecretStringTemplate: '{"JWT_SECRET":"REPLACE_ME_AFTER_DEPLOYMENT"}'
-        GenerateStringKey: "DUMMY"
-        PasswordLength: 1
+        SecretStringTemplate: "{}"
+        GenerateStringKey: "JWT_SECRET"
+        PasswordLength: 32
+        ExcludePunctuation: true
 
   TrustGuardMetaSecrets:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub "/TrustGuard/${Environment}/meta"
+      Name: !Sub "/TrustGuard/${Environment}/meta-${AWS::StackName}"
       Description: Meta WhatsApp/Instagram API credentials (APP_ID, APP_SECRET, tokens per CEO)
       KmsKeyId: !Ref TrustGuardKMSKey
-      GenerateSecretString:
-        SecretStringTemplate: '{"APP_ID":"REPLACE_ME","APP_SECRET":"REPLACE_ME"}'
-        GenerateStringKey: "DUMMY"
-        PasswordLength: 1
+      SecretString: '{"APP_ID":"","APP_SECRET":""}'
 
   # ========== DYNAMODB TABLES ==========
   
@@ -220,8 +221,6 @@ Resources:
           AttributeType: S
         - AttributeName: ceo_id
           AttributeType: S
-        - AttributeName: created_at
-          AttributeType: N
       KeySchema:
         - AttributeName: order_id
           KeyType: HASH
@@ -299,6 +298,31 @@ Resources:
         SSEEnabled: true
         SSEType: KMS
         KMSMasterKeyId: !Ref TrustGuardKMSKey
+
+  # Conversation State Table: Multi-turn conversation context for buyers
+  TrustGuardConversationStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "TrustGuard-ConversationState-${Environment}"
+      AttributeDefinitions:
+        - AttributeName: buyer_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: buyer_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
+      Tags:
+        - Key: Purpose
+          Value: Conversational-State-Management
+        - Key: DataRetention
+          Value: Auto-expire-after-1-hour
 
   # ========== S3 BUCKET (Receipts) ==========
   TrustGuardReceiptBucket:
@@ -464,6 +488,11 @@ Resources:
           Type: Api
           Properties:
             Path: /auth/{proxy+}
+            Method: ANY
+        ApiWebhooks:
+          Type: Api
+          Properties:
+            Path: /integrations/{proxy+}
             Method: ANY
 
   # VendorService: Vendor dashboard and order management

@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     # Environment
     AWS_REGION: str = "us-east-1"
     ENVIRONMENT: str = "dev"
+    STACK_NAME: str = "TrustGuard-Dev"
     
     # DynamoDB Tables
     USERS_TABLE: str = "TrustGuard-Users"
@@ -49,6 +50,7 @@ class Settings(BaseSettings):
     AUDIT_LOGS_TABLE: str = "TrustGuard-AuditLogs"
     ESCALATIONS_TABLE: str = "TrustGuard-Escalations"
     CEO_MAPPING_TABLE: str = "TrustGuard-CEOMapping"
+    CONVERSATION_STATE_TABLE: str = "TrustGuard-ConversationState"
     
     # S3
     RECEIPT_BUCKET: str = "trustguard-receipts"
@@ -63,6 +65,7 @@ class Settings(BaseSettings):
     HIGH_VALUE_THRESHOLD: int = 1000000  # ₦1,000,000
     
     # Meta Platform Integration (WhatsApp & Instagram)
+    META_SECRET_NAME: str = ""  # Will be constructed if not provided
     META_APP_ID: str = "dev_meta_app_id"
     META_APP_SECRET: str = "dev_meta_app_secret"
     META_WEBHOOK_VERIFY_TOKEN: str = "trustguard_verify_2025"

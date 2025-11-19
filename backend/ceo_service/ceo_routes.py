@@ -50,20 +50,17 @@ class CEORegisterRequest(BaseModel):
     name: str
     email: EmailStr
     phone: str
-    password: str
     company_name: Optional[str] = None
 
 
 class CEOLoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+    contact: str  # Phone or email for OTP delivery
 
 
 class VendorOnboardRequest(BaseModel):
     name: str
     email: EmailStr
     phone: str
-    password: Optional[str] = None
 
 
 class OrderApprovalRequest(BaseModel):
@@ -100,18 +97,25 @@ class ChatbotPreviewRequest(BaseModel):
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register_ceo_endpoint(req: CEORegisterRequest):
+    """
+    CEO registration with OTP verification (Zero Trust).
+    Sends 6-character OTP via SMS/Email.
+    """
     try:
         ceo = register_ceo(
             name=req.name,
             email=req.email,
             phone=req.phone,
-            password=req.password,
             company_name=req.company_name
         )
         
         logger.info("CEO registered via API", extra={"ceo_id": ceo.get("ceo_id"), "email": req.email})
         
-        return format_response("success", "CEO account created successfully", {"ceo": ceo})
+        return format_response("success", "CEO registration initiated. Check SMS/Email for 6-digit OTP to complete setup.", {
+            "ceo": ceo,
+            "otp_format": "6-digit numbers + symbols",
+            "ttl_minutes": 5
+        })
     
     except ValueError as e:
         error_message = str(e)
@@ -126,12 +130,22 @@ async def register_ceo_endpoint(req: CEORegisterRequest):
 
 @router.post("/login")
 async def login_ceo_endpoint(req: CEOLoginRequest):
+    """
+    CEO login with OTP verification (Zero Trust).
+    Sends 6-character OTP via SMS/Email.
+    """
     try:
-        result = authenticate_ceo(email=req.email, password=req.password)
+        from auth_service.auth_logic import login_ceo
         
-        logger.info("CEO logged in via API", extra={"ceo_id": result["ceo"].get("ceo_id"), "email": req.email})
+        result = login_ceo(req.contact)
         
-        return format_response("success", "Authentication successful", result)
+        logger.info("CEO login OTP sent", extra={"contact": req.contact})
+        
+        return format_response("success", "CEO OTP sent. Check SMS/Email for 6-digit code.", {
+            "otp_format": "6-digit numbers + symbols",
+            "ttl_minutes": 5,
+            "next_step": "POST /auth/verify-otp with the OTP code"
+        })
     
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
@@ -203,13 +217,15 @@ async def update_profile_endpoint(req: CEOProfileUpdateRequest, ceo_id: str = De
 
 @router.post("/vendors", status_code=status.HTTP_201_CREATED)
 async def onboard_vendor_endpoint(req: VendorOnboardRequest, ceo_id: str = Depends(get_current_ceo)):
+    """
+    CEO onboards a vendor. Vendor will receive OTP for first login.
+    """
     try:
         result = onboard_vendor(
             ceo_id=ceo_id,
             name=req.name,
             email=req.email,
-            phone=req.phone,
-            password=req.password
+            phone=req.phone
         )
         
         logger.info("Vendor onboarded via API", extra={"ceo_id": ceo_id, "vendor_id": result["vendor"].get("vendor_id")})
