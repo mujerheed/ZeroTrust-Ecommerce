@@ -1,116 +1,639 @@
 """
 Business logic for CEO operations.
+
+This module handles:
+- CEO registration and authentication
+- Vendor onboarding and management
+- Order approval workflows (flagged + high-value)
+- Dashboard metrics and reporting
+- Multi-CEO tenancy enforcement
 """
 
 import time
-import secrets
+import bcrypt
 import random
 import string
 from typing import Dict, Any, List, Optional
 from .database import (
-    get_all_vendors, get_vendor_by_id, create_vendor, delete_vendor,
-    get_flagged_transactions, update_order_status, get_audit_logs,
-    get_order_by_id, get_user_by_id
+    # CEO operations
+    create_ceo, get_ceo_by_id, get_ceo_by_email, update_ceo,
+    # Vendor operations
+    create_vendor, get_vendor_by_id, get_all_vendors_for_ceo, delete_vendor,
+    # Order operations
+    get_orders_for_ceo, get_flagged_orders_for_ceo, get_high_value_orders_for_ceo,
+    get_order_by_id, update_order_status, get_ceo_dashboard_stats,
+    # Audit logs
+    get_audit_logs, write_audit_log,
+    # User queries
+    get_user_by_id
 )
 from auth_service.database import save_otp, get_otp, delete_otp
-from common.escalation_db import (
-    get_pending_escalations, get_escalation, update_escalation_status
-)
-from common.sns_client import send_buyer_notification, send_escalation_resolved_notification
+from common.security import create_jwt
 from common.logger import logger
 
-# OTP settings
-OTP_TTL      = 300
-OTP_LENGTH   = 6
+# OTP settings for CEO
+OTP_TTL = 300  # 5 minutes
+OTP_LENGTH = 6  # 6 characters (digits + symbols)
 
-def generate_ceo_otp(user_id: str) -> str:
-    """Generate and store a 6-character OTP for a CEO."""
-    chars = string.digits + string.punctuation
-    otp   = ''.join(random.choices(chars, k=OTP_LENGTH))
-    save_otp(user_id, otp, "CEO", OTP_TTL)
+
+# ==================== Password Hashing ====================
+
+def hash_password(password: str) -> str:
+    """
+    Hash password using bcrypt.
+    
+    Args:
+        password: Plain text password
+    
+    Returns:
+        Bcrypt hash string
+    """
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """
+    Verify password against bcrypt hash.
+    
+    Args:
+        password: Plain text password
+        password_hash: Stored bcrypt hash
+    
+    Returns:
+        True if password matches, False otherwise
+    """
+    return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+
+
+# ==================== OTP Generation ====================
+
+def generate_ceo_otp() -> str:
+    """
+    Generate 6-character OTP for CEO (digits + symbols: 0-9!@#$%^&*).
+    
+    Returns:
+        6-character OTP string
+    """
+    chars = string.digits + "!@#$%^&*"
+    otp = ''.join(random.choices(chars, k=OTP_LENGTH))
     return otp
 
-def initiate_ceo_signup(name: str, phone: str, email: str) -> str:
-    """Create pending CEO entry and send signup OTP."""
-    ceo_id = f"ceo_{secrets.token_hex(4)}"
-    otp    = generate_ceo_otp(ceo_id)
-    # TODO: send OTP via SMS/Email
-    print(f"[CEO Signup] OTP for {ceo_id}: {otp}")
-    return ceo_id
 
-def verify_ceo_signup(user_id: str, submitted_otp: str, profile: Dict[str, Any]) -> str:
-    """Verify OTP, then create CEO user record."""
-    record = get_otp(user_id)
-    if not record or record["role"] != "CEO" or record["otp_code"] != submitted_otp:
-        raise ValueError("Invalid or expired OTP")
-    delete_otp(user_id)
-    # Create CEO in USERS_TABLE
-    vendor = {
-        "user_id": user_id,
-        "name": profile["name"],
-        "phone": profile["phone"],
-        "email": profile["email"],
-        "role": "CEO",
-        "created_by": user_id,
-        "created_at": int(time.time()),
-        "settings": profile.get("settings", {})
-    }
-    create_vendor(vendor)
-    return user_id
+def store_ceo_otp(ceo_id: str, otp: str):
+    """
+    Store CEO OTP with TTL.
+    
+    Args:
+        ceo_id: CEO identifier
+        otp: OTP code to store
+    """
+    save_otp(ceo_id, otp, "CEO", OTP_TTL)
+    logger.info(f"CEO OTP stored", extra={
+        "ceo_id": ceo_id,
+        "ttl_seconds": OTP_TTL
+    })
 
-def login_ceo(contact: str) -> str:
-    """Send login OTP to CEO via phone/email lookup."""
-    # Lookup CEO user_id by contact
-    # (scan or query by email/phone; omitted for brevity)
-    ceo_user = None  # implement lookup
-    if not ceo_user:
-        raise ValueError("CEO not found")
-    user_id = ceo_user["user_id"]
-    otp     = generate_ceo_otp(user_id)
-    # TODO: send OTP
-    print(f"[CEO Login] OTP for {user_id}: {otp}")
-    return user_id
 
-def list_vendors() -> List[Dict[str, Any]]:
-    """Return all vendor accounts."""
-    return get_all_vendors()
+def verify_ceo_otp(ceo_id: str, submitted_otp: str) -> bool:
+    """
+    Verify CEO OTP and delete if valid.
+    
+    Args:
+        ceo_id: CEO identifier
+        submitted_otp: OTP submitted by CEO
+    
+    Returns:
+        True if OTP is valid, False otherwise
+    """
+    record = get_otp(ceo_id)
+    
+    if not record:
+        logger.warning("OTP not found", extra={"ceo_id": ceo_id})
+        return False
+    
+    if record.get("role") != "CEO":
+        logger.warning("OTP role mismatch", extra={
+            "ceo_id": ceo_id,
+            "expected_role": "CEO",
+            "actual_role": record.get("role")
+        })
+        return False
+    
+    if record.get("otp_code") != submitted_otp:
+        logger.warning("OTP mismatch", extra={"ceo_id": ceo_id})
+        return False
+    
+    # Check expiration
+    expires_at = record.get("expires_at", 0)
+    if int(time.time()) > expires_at:
+        logger.warning("OTP expired", extra={
+            "ceo_id": ceo_id,
+            "expires_at": expires_at
+        })
+        delete_otp(ceo_id)
+        return False
+    
+    # Valid OTP - delete it (single-use)
+    delete_otp(ceo_id)
+    logger.info("CEO OTP verified", extra={"ceo_id": ceo_id})
+    return True
 
-def add_vendor(name: str, phone: str, email: str, created_by: str) -> str:
-    """Create a new vendor; generate user_id and store."""
-    vendor_id = f"vendor_{secrets.token_hex(4)}"
-    vendor    = {
-        "user_id": vendor_id,
-        "name": name,
-        "phone": phone,
+
+
+# ==================== CEO Registration ====================
+
+def register_ceo(name: str, email: str, phone: str, password: str, company_name: str = None) -> Dict[str, Any]:
+    """
+    Register a new CEO account.
+    
+    Args:
+        name: CEO full name
+        email: CEO email (unique identifier)
+        phone: CEO phone number (Nigerian format)
+        password: Plain text password (will be hashed)
+        company_name: Optional company/business name
+    
+    Returns:
+        Created CEO record (without password_hash)
+    
+    Raises:
+        ValueError: If email already exists
+    """
+    # Check if email already exists
+    existing_ceo = get_ceo_by_email(email)
+    if existing_ceo:
+        logger.warning("CEO registration failed - email exists", extra={"email": email})
+        raise ValueError("Email already registered")
+    
+    # Validate password strength (basic check)
+    if len(password) < 8:
+        raise ValueError("Password must be at least 8 characters")
+    
+    # Hash password
+    password_hash = hash_password(password)
+    
+    # Create CEO record
+    ceo_record = create_ceo(
+        name=name,
+        email=email,
+        phone=phone,
+        password_hash=password_hash,
+        company_name=company_name
+    )
+    
+    # Log creation
+    write_audit_log(
+        ceo_id=ceo_record["ceo_id"],
+        action="ceo_registered",
+        user_id=ceo_record["ceo_id"],
+        details={"email": email, "company_name": company_name}
+    )
+    
+    logger.info("CEO registered", extra={
+        "ceo_id": ceo_record["ceo_id"],
         "email": email,
-        "role": "Vendor",
-        "created_by": created_by,
-        "created_at": int(time.time())
+        "company_name": company_name
+    })
+    
+    # Remove sensitive data before returning
+    ceo_record.pop("password_hash", None)
+    return ceo_record
+
+
+# ==================== CEO Authentication ====================
+
+def authenticate_ceo(email: str, password: str) -> Dict[str, Any]:
+    """
+    Authenticate CEO and generate JWT token.
+    
+    Args:
+        email: CEO email
+        password: Plain text password
+    
+    Returns:
+        Dictionary with CEO data and JWT token
+    
+    Raises:
+        ValueError: If credentials are invalid
+    """
+    # Get CEO by email
+    ceo = get_ceo_by_email(email)
+    if not ceo:
+        logger.warning("CEO login failed - email not found", extra={"email": email})
+        raise ValueError("Invalid email or password")
+    
+    # Verify password
+    password_hash = ceo.get("password_hash", "")
+    if not verify_password(password, password_hash):
+        logger.warning("CEO login failed - password mismatch", extra={
+            "ceo_id": ceo.get("ceo_id"),
+            "email": email
+        })
+        raise ValueError("Invalid email or password")
+    
+    # Generate JWT token
+    ceo_id = ceo["ceo_id"]
+    token = create_jwt(subject=ceo_id, role="CEO", expires_minutes=60)
+    
+    # Log successful login
+    write_audit_log(
+        ceo_id=ceo_id,
+        action="ceo_login",
+        user_id=ceo_id,
+        details={"email": email}
+    )
+    
+    logger.info("CEO authenticated", extra={
+        "ceo_id": ceo_id,
+        "email": email
+    })
+    
+    # Remove sensitive data
+    ceo.pop("password_hash", None)
+    
+    return {
+        "ceo": ceo,
+        "token": token
     }
-    return create_vendor(vendor)
 
-def remove_vendor(vendor_id: str):
-    """Delete a vendor account by user_id."""
-    if not get_vendor_by_id(vendor_id):
+
+# ==================== Vendor Management ====================
+
+def onboard_vendor(ceo_id: str, name: str, email: str, phone: str, password: str = None) -> Dict[str, Any]:
+    """
+    Onboard a new vendor (created by CEO).
+    
+    Args:
+        ceo_id: CEO identifier (who is creating the vendor)
+        name: Vendor name
+        email: Vendor email
+        phone: Vendor phone number
+        password: Optional password (auto-generated if not provided)
+    
+    Returns:
+        Created vendor record with temporary credentials
+    """
+    # Verify CEO exists
+    ceo = get_ceo_by_id(ceo_id)
+    if not ceo:
+        raise ValueError("CEO not found")
+    
+    # Generate password if not provided
+    if not password:
+        password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+    
+    # Hash password
+    password_hash = hash_password(password)
+    
+    # Create vendor
+    vendor_data = {
+        "name": name,
+        "email": email.lower(),
+        "phone": phone,
+        "password_hash": password_hash,
+        "ceo_id": ceo_id,  # Multi-tenancy
+        "created_by": ceo_id,
+        "verified": True,  # Vendors are pre-verified by CEO
+    }
+    
+    vendor_id = create_vendor(vendor_data)
+    
+    # Log vendor creation
+    write_audit_log(
+        ceo_id=ceo_id,
+        action="vendor_onboarded",
+        user_id=ceo_id,
+        details={"vendor_id": vendor_id, "vendor_email": email}
+    )
+    
+    logger.info("Vendor onboarded", extra={
+        "ceo_id": ceo_id,
+        "vendor_id": vendor_id,
+        "vendor_email": email
+    })
+    
+    # Get created vendor
+    vendor = get_vendor_by_id(vendor_id)
+    if vendor:
+        vendor.pop("password_hash", None)
+    
+    return {
+        "vendor": vendor,
+        "temporary_password": password  # Return for CEO to share with vendor
+    }
+
+
+def list_vendors_for_ceo(ceo_id: str) -> List[Dict[str, Any]]:
+    """
+    List all vendors managed by a CEO (multi-tenancy).
+    
+    Args:
+        ceo_id: CEO identifier
+    
+    Returns:
+        List of vendor records (without sensitive data)
+    """
+    vendors = get_all_vendors_for_ceo(ceo_id)
+    
+    # Remove sensitive data
+    for vendor in vendors:
+        vendor.pop("password_hash", None)
+    
+    logger.info("Vendors listed", extra={
+        "ceo_id": ceo_id,
+        "count": len(vendors)
+    })
+    
+    return vendors
+
+
+def remove_vendor_by_ceo(ceo_id: str, vendor_id: str):
+    """
+    Remove a vendor (CEO authorization required).
+    
+    Args:
+        ceo_id: CEO identifier
+        vendor_id: Vendor identifier to delete
+    
+    Raises:
+        ValueError: If vendor not found or not owned by CEO
+    """
+    # Verify vendor exists and belongs to CEO
+    vendor = get_vendor_by_id(vendor_id)
+    if not vendor:
         raise ValueError("Vendor not found")
+    
+    if vendor.get("ceo_id") != ceo_id:
+        logger.warning("CEO attempted to delete vendor from another CEO", extra={
+            "ceo_id": ceo_id,
+            "vendor_id": vendor_id,
+            "vendor_ceo_id": vendor.get("ceo_id")
+        })
+        raise ValueError("Unauthorized: Vendor belongs to another CEO")
+    
+    # Delete vendor
     delete_vendor(vendor_id)
+    
+    # Log deletion
+    write_audit_log(
+        ceo_id=ceo_id,
+        action="vendor_deleted",
+        user_id=ceo_id,
+        details={"vendor_id": vendor_id, "vendor_email": vendor.get("email")}
+    )
+    
+    logger.info("Vendor deleted", extra={
+        "ceo_id": ceo_id,
+        "vendor_id": vendor_id
+    })
 
-def view_flagged_orders() -> List[Dict[str, Any]]:
-    """Retrieve all flagged or high-value transactions."""
-    return get_flagged_transactions()
 
-def approve_transaction(order_id: str, ceo_id: str):
-    """CEO approves a flagged or high-value order."""
-    update_order_status(order_id, "verified", ceo_id)
+# ==================== Dashboard & Reporting ====================
 
-def decline_transaction(order_id: str, ceo_id: str):
-    """CEO declines a flagged or high-value order."""
-    update_order_status(order_id, "declined", ceo_id)
+def get_dashboard_metrics(ceo_id: str) -> Dict[str, Any]:
+    """
+    Get aggregated dashboard metrics for CEO.
+    
+    Args:
+        ceo_id: CEO identifier
+    
+    Returns:
+        Dictionary with dashboard metrics
+    """
+    stats = get_ceo_dashboard_stats(ceo_id)
+    
+    logger.info("Dashboard metrics retrieved", extra={
+        "ceo_id": ceo_id,
+        "total_orders": stats.get("total_orders", 0),
+        "total_revenue": stats.get("total_revenue", 0)
+    })
+    
+    return stats
 
-def fetch_audit_logs(limit: int = 100) -> List[Dict[str, Any]]:
-    """Fetch recent audit logs entries."""
-    return get_audit_logs(limit)
 
+
+# ==================== Approval Workflows ====================
+
+def get_pending_approvals(ceo_id: str) -> Dict[str, Any]:
+    """
+    Get all pending approval requests for CEO (flagged + high-value orders).
+    
+    Args:
+        ceo_id: CEO identifier
+    
+    Returns:
+        Dictionary with flagged orders and high-value orders
+    """
+    flagged = get_flagged_orders_for_ceo(ceo_id)
+    high_value = get_high_value_orders_for_ceo(ceo_id)
+    
+    # Filter out duplicates (order can be both flagged and high-value)
+    high_value_ids = {order["order_id"] for order in high_value}
+    unique_high_value = [
+        order for order in high_value 
+        if order["order_id"] not in {f["order_id"] for f in flagged}
+    ]
+    
+    logger.info("Pending approvals retrieved", extra={
+        "ceo_id": ceo_id,
+        "flagged_count": len(flagged),
+        "high_value_count": len(unique_high_value)
+    })
+    
+    return {
+        "flagged_orders": flagged,
+        "high_value_orders": unique_high_value,
+        "total_pending": len(flagged) + len(unique_high_value)
+    }
+
+
+def approve_order(ceo_id: str, order_id: str, otp: str = None, notes: str = None) -> Dict[str, Any]:
+    """
+    CEO approves a flagged or high-value order.
+    
+    Args:
+        ceo_id: CEO identifier
+        order_id: Order to approve
+        otp: Optional OTP for high-security approvals
+        notes: Optional approval notes
+    
+    Returns:
+        Updated order record
+    
+    Raises:
+        ValueError: If order not found or not authorized
+    """
+    # Get order
+    order = get_order_by_id(order_id)
+    if not order:
+        raise ValueError("Order not found")
+    
+    # Verify CEO owns this order (multi-tenancy)
+    if order.get("ceo_id") != ceo_id:
+        logger.warning("CEO attempted to approve order from another CEO", extra={
+            "ceo_id": ceo_id,
+            "order_id": order_id,
+            "order_ceo_id": order.get("ceo_id")
+        })
+        raise ValueError("Unauthorized: Order belongs to another CEO")
+    
+    # If OTP provided, verify it (high-value approval)
+    if otp:
+        if not verify_ceo_otp(ceo_id, otp):
+            raise ValueError("Invalid or expired OTP")
+    
+    # Update order status to approved/verified
+    new_status = "approved" if order.get("order_status") == "flagged" else "confirmed"
+    update_order_status(
+        order_id=order_id,
+        new_status=new_status,
+        approved_by=ceo_id,
+        notes=notes
+    )
+    
+    # Log approval
+    write_audit_log(
+        ceo_id=ceo_id,
+        action="order_approved",
+        user_id=ceo_id,
+        details={
+            "order_id": order_id,
+            "previous_status": order.get("order_status"),
+            "new_status": new_status,
+            "notes": notes
+        }
+    )
+    
+    logger.info("Order approved", extra={
+        "ceo_id": ceo_id,
+        "order_id": order_id,
+        "new_status": new_status
+    })
+    
+    # Return updated order
+    return get_order_by_id(order_id)
+
+
+def reject_order(ceo_id: str, order_id: str, reason: str = None) -> Dict[str, Any]:
+    """
+    CEO rejects a flagged or high-value order.
+    
+    Args:
+        ceo_id: CEO identifier
+        order_id: Order to reject
+        reason: Rejection reason
+    
+    Returns:
+        Updated order record
+    
+    Raises:
+        ValueError: If order not found or not authorized
+    """
+    # Get order
+    order = get_order_by_id(order_id)
+    if not order:
+        raise ValueError("Order not found")
+    
+    # Verify CEO owns this order (multi-tenancy)
+    if order.get("ceo_id") != ceo_id:
+        logger.warning("CEO attempted to reject order from another CEO", extra={
+            "ceo_id": ceo_id,
+            "order_id": order_id,
+            "order_ceo_id": order.get("ceo_id")
+        })
+        raise ValueError("Unauthorized: Order belongs to another CEO")
+    
+    # Update order status to declined/rejected
+    update_order_status(
+        order_id=order_id,
+        new_status="declined",
+        approved_by=ceo_id,
+        notes=reason
+    )
+    
+    # Log rejection
+    write_audit_log(
+        ceo_id=ceo_id,
+        action="order_rejected",
+        user_id=ceo_id,
+        details={
+            "order_id": order_id,
+            "previous_status": order.get("order_status"),
+            "reason": reason
+        }
+    )
+    
+    logger.info("Order rejected", extra={
+        "ceo_id": ceo_id,
+        "order_id": order_id,
+        "reason": reason
+    })
+    
+    # Return updated order
+    return get_order_by_id(order_id)
+
+
+def request_approval_otp(ceo_id: str, order_id: str) -> str:
+    """
+    Generate and send OTP for high-value order approval.
+    
+    Args:
+        ceo_id: CEO identifier
+        order_id: Order requiring approval
+    
+    Returns:
+        OTP code (for development/testing - in production send via SMS/email)
+    """
+    # Verify order exists and belongs to CEO
+    order = get_order_by_id(order_id)
+    if not order:
+        raise ValueError("Order not found")
+    
+    if order.get("ceo_id") != ceo_id:
+        raise ValueError("Unauthorized: Order belongs to another CEO")
+    
+    # Generate and store OTP
+    otp = generate_ceo_otp()
+    store_ceo_otp(ceo_id, otp)
+    
+    logger.info("Approval OTP generated", extra={
+        "ceo_id": ceo_id,
+        "order_id": order_id
+    })
+    
+    # TODO: Send OTP via SMS/email in production
+    # For now, return OTP for testing
+    return otp
+
+
+# ==================== Audit Log Access ====================
+
+def get_audit_logs_for_ceo(ceo_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Retrieve audit logs for CEO (multi-tenancy).
+    
+    Args:
+        ceo_id: CEO identifier
+        limit: Maximum number of logs to return
+    
+    Returns:
+        List of audit log entries
+    """
+    logs = get_audit_logs(ceo_id=ceo_id, limit=limit)
+    
+    logger.info("Audit logs retrieved", extra={
+        "ceo_id": ceo_id,
+        "count": len(logs)
+    })
+    
+    return logs
+
+
+
+# Note: Legacy escalation functions below are maintained for backward compatibility
+# with existing code. Consider migrating to the new approval workflow functions above.
 
 def get_ceo_pending_escalations(ceo_id: str, limit: int = 50) -> List[Dict[str, Any]]:
     """
