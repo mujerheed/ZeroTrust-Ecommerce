@@ -58,7 +58,7 @@ class VerifyReceiptRequest(BaseModel):
 
 # ==================== RECEIPT UPLOAD ENDPOINTS ====================
 
-@router.post("/receipts/request-upload", status_code=status.HTTP_200_OK)
+@router.post("/request-upload", status_code=status.HTTP_200_OK)
 async def request_upload(req: RequestUploadRequest):
     """
     Generate presigned S3 URL for buyer to upload receipt.
@@ -93,7 +93,7 @@ async def request_upload(req: RequestUploadRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.post("/receipts/confirm-upload", status_code=status.HTTP_201_CREATED)
+@router.post("/confirm-upload", status_code=status.HTTP_201_CREATED)
 async def confirm_upload(req: ConfirmUploadRequest):
     """
     Confirm receipt upload and save metadata to DynamoDB.
@@ -127,7 +127,7 @@ async def confirm_upload(req: ConfirmUploadRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.get("/receipts/{receipt_id}", status_code=status.HTTP_200_OK)
+@router.get("/{receipt_id}", status_code=status.HTTP_200_OK)
 async def get_receipt(receipt_id: str, token: str = Depends(security)):
     """
     Get receipt details with download URL.
