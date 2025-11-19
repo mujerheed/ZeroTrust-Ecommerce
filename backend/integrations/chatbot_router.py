@@ -37,6 +37,8 @@ class ChatbotRouter:
         'register': r'(?i)^(register|start|hi|hello|hey|begin)$',
         'verify_otp': r'(?i)^verify\s+([a-zA-Z0-9!@#$%^&*]{6,8})$',
         'otp_only': r'^([a-zA-Z0-9!@#$%^&*]{8})$',  # Direct 8-char OTP input
+        'confirm_order': r'(?i)^(?:confirm|accept|yes|ok)(?:\s+(\S+))?$',  # confirm or confirm ord_123
+        'cancel_order': r'(?i)^(?:cancel|reject|no)(?:\s+(\S+))?$',  # cancel or cancel ord_123
         'order_status': r'(?i)^(?:order|status)\s+(\S+)$',
         'upload': r'(?i)^(?:upload|receipt)$',
         'help': r'(?i)^(?:help|\?)$'
@@ -116,6 +118,12 @@ class ChatbotRouter:
         elif intent == 'otp_only':
             # Direct OTP input (8 characters)
             return await self.handle_otp_verification(sender_id, value, platform, ceo_id)
+        
+        elif intent == 'confirm_order':
+            return await self.handle_order_confirmation(sender_id, value, platform, ceo_id)
+        
+        elif intent == 'cancel_order':
+            return await self.handle_order_cancellation(sender_id, value, platform, ceo_id)
         
         elif intent == 'order_status':
             return await self.handle_order_status(sender_id, value, platform, ceo_id)
@@ -447,6 +455,12 @@ Available Commands:
 🔐 *verify <code>*
    Verify your OTP code
 
+✅ *confirm*
+   Confirm your pending order
+
+❌ *cancel*
+   Cancel your pending order
+
 📦 *order <order_id>*
    Check order status
 
@@ -473,6 +487,196 @@ TrustGuard - Your Shopping Security Partner"""
             'platform': platform
         }
     
+    async def handle_order_confirmation(
+        self,
+        sender_id: str,
+        order_id: Optional[str],
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle buyer confirming an order.
+        
+        Flow:
+        1. If order_id provided, confirm that specific order
+        2. If no order_id, fetch buyer's most recent pending order
+        3. Update order status to 'confirmed'
+        4. Send confirmation message
+        
+        Args:
+            sender_id: Buyer ID
+            order_id: Optional order ID (if buyer says "confirm ord_123")
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with action result
+        """
+        try:
+            # Import here to avoid circular dependency
+            from order_service.database import list_buyer_orders, update_order_status
+            
+            # If no order_id provided, get most recent pending order
+            if not order_id:
+                buyer_orders = list_buyer_orders(sender_id)
+                pending_orders = [o for o in buyer_orders if o.get('status') == 'pending']
+                
+                if not pending_orders:
+                    msg = "❌ You don't have any pending orders to confirm.\n\n"
+                    msg += "Use *order <order_id>* to check your order status."
+                    
+                    if platform == 'whatsapp':
+                        await self.whatsapp.send_message(sender_id, msg)
+                    else:
+                        await self.instagram.send_message(sender_id, msg)
+                    
+                    return {'action': 'no_pending_orders', 'platform': platform}
+                
+                # Get most recent (first in list, sorted by created_at desc)
+                order_id = pending_orders[0].get('order_id')
+            
+            # Confirm the order
+            updated_order = update_order_status(
+                order_id=order_id,
+                new_status='confirmed',
+                notes='Confirmed by buyer via chatbot'
+            )
+            
+            logger.info(f"Order {order_id} confirmed by buyer {sender_id}")
+            
+            # Send success message
+            total = updated_order.get('total_amount', 0)
+            currency_symbol = "₦" if updated_order.get('currency') == 'NGN' else updated_order.get('currency', '')
+            
+            msg = f"""✅ *Order Confirmed!*
+
+📋 Order ID: `{order_id}`
+💰 Total: {currency_symbol}{total:,.2f}
+
+Your order has been confirmed successfully. 
+
+📸 *Next Step:*
+1. Make payment to the vendor
+2. Reply with *'upload'* to submit your payment receipt
+
+Thank you for shopping with us! 🛍️"""
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            return {
+                'action': 'order_confirmed',
+                'order_id': order_id,
+                'platform': platform
+            }
+            
+        except Exception as e:
+            logger.error(f"Order confirmation failed: {str(e)}")
+            
+            msg = f"❌ Failed to confirm order: {str(e)}\n\n"
+            msg += "Please contact support if the issue persists."
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            return {'action': 'error', 'error': str(e), 'platform': platform}
+    
+    async def handle_order_cancellation(
+        self,
+        sender_id: str,
+        order_id: Optional[str],
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle buyer cancelling an order.
+        
+        Flow:
+        1. If order_id provided, cancel that specific order
+        2. If no order_id, fetch buyer's most recent pending order
+        3. Update order status to 'cancelled'
+        4. Send cancellation confirmation
+        
+        Args:
+            sender_id: Buyer ID
+            order_id: Optional order ID (if buyer says "cancel ord_123")
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with action result
+        """
+        try:
+            # Import here to avoid circular dependency
+            from order_service.database import list_buyer_orders, update_order_status
+            
+            # If no order_id provided, get most recent pending order
+            if not order_id:
+                buyer_orders = list_buyer_orders(sender_id)
+                cancellable_orders = [o for o in buyer_orders if o.get('status') in ['pending', 'confirmed']]
+                
+                if not cancellable_orders:
+                    msg = "❌ You don't have any orders that can be cancelled.\n\n"
+                    msg += "Only pending or confirmed orders can be cancelled."
+                    
+                    if platform == 'whatsapp':
+                        await self.whatsapp.send_message(sender_id, msg)
+                    else:
+                        await self.instagram.send_message(sender_id, msg)
+                    
+                    return {'action': 'no_cancellable_orders', 'platform': platform}
+                
+                # Get most recent
+                order_id = cancellable_orders[0].get('order_id')
+            
+            # Cancel the order
+            updated_order = update_order_status(
+                order_id=order_id,
+                new_status='cancelled',
+                notes='Cancelled by buyer via chatbot'
+            )
+            
+            logger.info(f"Order {order_id} cancelled by buyer {sender_id}")
+            
+            # Send confirmation message
+            msg = f"""❌ *Order Cancelled*
+
+📋 Order ID: `{order_id}`
+
+Your order has been cancelled successfully.
+
+If you'd like to create a new order, please contact your vendor.
+
+Thank you! 🙏"""
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            return {
+                'action': 'order_cancelled',
+                'order_id': order_id,
+                'platform': platform
+            }
+            
+        except Exception as e:
+            logger.error(f"Order cancellation failed: {str(e)}")
+            
+            msg = f"❌ Failed to cancel order: {str(e)}\n\n"
+            msg += "Please contact support if the issue persists."
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            return {'action': 'error', 'error': str(e), 'platform': platform}
+    
     async def handle_unknown(
         self,
         sender_id: str,
@@ -497,6 +701,9 @@ TrustGuard - Your Shopping Security Partner"""
 Try these commands:
 • *register* - Create account
 • *verify <code>* - Verify OTP
+• *confirm* - Confirm order
+• *cancel* - Cancel order
+• *order <id>* - Check order status
 • *upload* - Upload receipt
 • *help* - See all commands
 
