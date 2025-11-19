@@ -9,7 +9,8 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 from .auth_logic import (
     register_ceo, login_ceo, login_vendor, 
-    verify_otp_universal, create_vendor_account
+    verify_otp_universal, create_vendor_account,
+    request_data_erasure_otp, erase_buyer_data
 )
 from .utils import (
     format_response, validate_phone_number, validate_email,
@@ -389,4 +390,129 @@ async def instagram_webhook_receive(request: Request):
         from common.logger import logger
         logger.error(f"Instagram webhook error: {str(e)}")
         return {"status": "error", "message": str(e)}
+
+
+# ========== DATA ERASURE (GDPR/NDPR COMPLIANCE) ==========
+
+class DataErasureOTPRequest(BaseModel):
+    buyer_id: str
+
+class DataErasureConfirmRequest(BaseModel):
+    buyer_id: str
+    otp: str
+
+@router.post("/privacy/request-erasure-otp", status_code=status.HTTP_200_OK)
+async def request_erasure_otp(request: Request, req: DataErasureOTPRequest):
+    """
+    Request OTP for data erasure (GDPR/NDPR "Right to be Forgotten").
+    
+    Step 1 of 2-step verification process before permanently anonymizing buyer data.
+    Sends 8-character OTP to buyer's platform (WhatsApp/Instagram) or SMS.
+    
+    Request:
+        {
+            "buyer_id": "wa_2348012345678"
+        }
+    
+    Response:
+        {
+            "status": "success",
+            "message": "OTP sent for data erasure verification",
+            "buyer_id": "wa_2348012345678",
+            "otp_ttl_seconds": 300
+        }
+    """
+    from .auth_logic import request_data_erasure_otp
+    
+    try:
+        # Rate limiting - prevent OTP spam
+        rate_limit_check(
+            request.client.host,
+            f"data_erasure_otp_{req.buyer_id}",
+            max_attempts=3,
+            window_minutes=60
+        )
+        
+        result = request_data_erasure_otp(req.buyer_id)
+        
+        return format_response(
+            "success",
+            "OTP sent for data erasure verification. This action is irreversible.",
+            result
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send OTP: {str(e)}")
+
+
+@router.post("/privacy/erase", status_code=status.HTTP_200_OK)
+async def erase_buyer_data_endpoint(request: Request, req: DataErasureConfirmRequest):
+    """
+    Permanently erase buyer PII after OTP verification (GDPR/NDPR compliance).
+    
+    ⚠️ WARNING: This action is IRREVERSIBLE ⚠️
+    
+    Process:
+    1. Verify OTP
+    2. Anonymize PII: name → [REDACTED], phone → [REDACTED]
+    3. Remove: email, delivery_address, metadata
+    4. Preserve: Anonymized order history (legal/forensic requirements)
+    5. Log: DATA_ERASURE_CONFIRMED audit event
+    
+    Request:
+        {
+            "buyer_id": "wa_2348012345678",
+            "otp": "AB12CD34"
+        }
+    
+    Response:
+        {
+            "status": "success",
+            "message": "Your personal data has been permanently erased",
+            "buyer_id": "wa_2348012345678",
+            "anonymized_at": 1700400000,
+            "preserved_data": "Anonymized order history retained for legal compliance",
+            "compliance": "GDPR/NDPR Right to be Forgotten"
+        }
+    
+    Errors:
+        404: Buyer not found or already anonymized
+        400: Invalid OTP
+        500: Server error
+    """
+    from .auth_logic import erase_buyer_data
+    
+    try:
+        # Rate limiting - prevent brute force OTP attacks
+        rate_limit_check(
+            request.client.host,
+            f"data_erasure_confirm_{req.buyer_id}",
+            max_attempts=5,
+            window_minutes=15
+        )
+        
+        result = erase_buyer_data(req.buyer_id, req.otp)
+        
+        log_security_event(req.buyer_id, "DATA_ERASURE_COMPLETED", {
+            "ip": request.client.host,
+            "timestamp": result.get('anonymized_at')
+        })
+        
+        return format_response(
+            "success",
+            "Your personal data has been permanently erased",
+            result
+        )
+    
+    except ValueError as e:
+        # Invalid OTP or buyer not found
+        log_security_event(req.buyer_id, "DATA_ERASURE_FAILED", {
+            "ip": request.client.host,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Data erasure failed: {str(e)}")
 

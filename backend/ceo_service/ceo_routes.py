@@ -19,7 +19,8 @@ from .ceo_logic import (
     onboard_vendor, list_vendors_for_ceo, remove_vendor_by_ceo,
     get_dashboard_metrics,
     get_pending_approvals, approve_order, reject_order, request_approval_otp,
-    get_audit_logs_for_ceo
+    get_audit_logs_for_ceo,
+    update_ceo_profile
 )
 from .utils import format_response, verify_ceo_token
 from common.logger import logger
@@ -67,6 +68,14 @@ class OrderRejectionRequest(BaseModel):
     reason: str
 
 
+class CEOProfileUpdateRequest(BaseModel):
+    company_name: Optional[str] = None
+    phone: Optional[str] = None
+    business_hours: Optional[str] = None
+    delivery_fee: Optional[float] = None
+    email: Optional[EmailStr] = None
+    otp: Optional[str] = None  # Required if updating email
+
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register_ceo_endpoint(req: CEORegisterRequest):
@@ -108,6 +117,67 @@ async def login_ceo_endpoint(req: CEOLoginRequest):
     except Exception as e:
         logger.error("CEO login failed", extra={"error": str(e)})
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Login failed")
+
+
+@router.patch("/profile")
+async def update_profile_endpoint(req: CEOProfileUpdateRequest, ceo_id: str = Depends(get_current_ceo)):
+    """
+    Update CEO profile information.
+    
+    Regular fields (company_name, phone, business_hours, delivery_fee) can be updated directly.
+    Sensitive fields (email) require OTP verification.
+    
+    Request:
+        {
+            "company_name": "Alice's Electronics Ltd.",
+            "phone": "+2348012345678",
+            "business_hours": "Mon-Fri 9AM-6PM, Sat 10AM-4PM",
+            "delivery_fee": 2500.00,
+            "email": "newemail@example.com",  // Optional, requires OTP
+            "otp": "123456"  // Required if updating email
+        }
+    
+    Response:
+        {
+            "status": "success",
+            "message": "Profile updated successfully",
+            "data": {
+                "ceo_id": "ceo_...",
+                "company_name": "Alice's Electronics Ltd.",
+                ...
+            }
+        }
+    """
+    try:
+        updated_ceo = update_ceo_profile(
+            ceo_id=ceo_id,
+            company_name=req.company_name,
+            phone=req.phone,
+            business_hours=req.business_hours,
+            delivery_fee=req.delivery_fee,
+            email=req.email,
+            otp=req.otp
+        )
+        
+        logger.info("CEO profile updated via API", extra={"ceo_id": ceo_id})
+        
+        return format_response("success", "Profile updated successfully", {"ceo": updated_ceo})
+    
+    except ValueError as e:
+        error_message = str(e)
+        if "not found" in error_message.lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error_message)
+        elif "otp" in error_message.lower() and "required" in error_message.lower():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_message)
+        elif "invalid" in error_message.lower() or "expired" in error_message.lower():
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=error_message)
+        elif "already in use" in error_message.lower():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error_message)
+        else:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_message)
+    except Exception as e:
+        logger.error("CEO profile update failed", extra={"ceo_id": ceo_id, "error": str(e)})
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Profile update failed")
 
 
 @router.post("/vendors", status_code=status.HTTP_201_CREATED)

@@ -32,7 +32,16 @@ def get_buyer_by_id(buyer_id: str) -> dict:
     """
     return get_user(buyer_id)
 
-def create_buyer(buyer_id: str, phone: str, platform: str, ceo_id: str = None, meta: dict = None) -> dict:
+def create_buyer(
+    buyer_id: str, 
+    phone: str, 
+    platform: str, 
+    ceo_id: str = None, 
+    name: str = None,
+    delivery_address: str = None,
+    email: str = None,
+    meta: dict = None
+) -> dict:
     """
     Create a new buyer record in Users table.
     
@@ -41,6 +50,9 @@ def create_buyer(buyer_id: str, phone: str, platform: str, ceo_id: str = None, m
         phone: Buyer phone number (Nigerian format)
         platform: 'whatsapp' or 'instagram'
         ceo_id: CEO who manages this buyer (for multi-tenancy)
+        name: Buyer's full name (optional)
+        delivery_address: Delivery address (street, city, landmark) (optional)
+        email: Buyer's email address (optional, for Instagram users)
         meta: Additional metadata (e.g., Instagram PSID, username)
     
     Returns:
@@ -59,6 +71,15 @@ def create_buyer(buyer_id: str, phone: str, platform: str, ceo_id: str = None, m
     
     if ceo_id:
         buyer_record["ceo_id"] = ceo_id
+    
+    if name:
+        buyer_record["name"] = name
+    
+    if delivery_address:
+        buyer_record["delivery_address"] = delivery_address
+    
+    if email:
+        buyer_record["email"] = email
     
     if meta:
         buyer_record["meta"] = meta
@@ -152,4 +173,92 @@ def log_event(user_id: str, action: str, status: str, message: str = None, meta:
         "message": message or "",
         "meta": meta or {}
     })
+
+def anonymize_buyer_data(buyer_id: str) -> dict:
+    """
+    Anonymize buyer PII for GDPR/NDPR compliance (data erasure request).
+    
+    Implements "right to be forgotten" while preserving anonymized transaction metadata
+    for forensic/legal requirements (Core Principle #7).
+    
+    Process:
+    1. Replace name with "[REDACTED]"
+    2. Replace phone with "[REDACTED]"
+    3. Remove delivery_address (if exists)
+    4. Remove email (if exists)
+    5. Mark account as anonymized
+    6. Preserve: user_id, role, platform, ceo_id, order history references
+    
+    Args:
+        buyer_id: Buyer identifier to anonymize
+    
+    Returns:
+        Anonymized buyer record
+    
+    Raises:
+        ValueError: If buyer not found or already anonymized
+    """
+    table = dynamodb.Table(USERS_TABLE_NAME)
+    
+    # Get existing buyer record
+    buyer = get_buyer_by_id(buyer_id)
+    if not buyer:
+        raise ValueError(f"Buyer {buyer_id} not found")
+    
+    if buyer.get("anonymized"):
+        raise ValueError(f"Buyer {buyer_id} already anonymized")
+    
+    # Build anonymization update
+    anonymized_data = {
+        "name": "[REDACTED]",
+        "phone": "[REDACTED]",
+        "anonymized": True,
+        "anonymized_at": int(time.time()),
+        "data_erasure_reason": "User requested data deletion (GDPR/NDPR compliance)"
+    }
+    
+    # Remove optional PII fields
+    remove_expr_parts = []
+    if "email" in buyer:
+        remove_expr_parts.append("#email")
+    if "delivery_address" in buyer:
+        remove_expr_parts.append("#delivery_address")
+    if "meta" in buyer:
+        remove_expr_parts.append("#meta")
+    
+    # Build update expression
+    update_expr_parts = []
+    expr_attr_values = {}
+    expr_attr_names = {}
+    
+    for key, value in anonymized_data.items():
+        placeholder = f"#{key}"
+        value_placeholder = f":{key}"
+        update_expr_parts.append(f"{placeholder} = {value_placeholder}")
+        expr_attr_names[placeholder] = key
+        expr_attr_values[value_placeholder] = value
+    
+    # Always update timestamp
+    update_expr_parts.append("#updated_at = :updated_at")
+    expr_attr_names["#updated_at"] = "updated_at"
+    expr_attr_values[":updated_at"] = int(time.time())
+    
+    # Combine SET and REMOVE clauses
+    update_expr = "SET " + ", ".join(update_expr_parts)
+    
+    if remove_expr_parts:
+        for field in remove_expr_parts:
+            expr_attr_names[field] = field.replace("#", "")
+        update_expr += " REMOVE " + ", ".join(remove_expr_parts)
+    
+    # Execute update
+    resp = table.update_item(
+        Key={"user_id": buyer_id},
+        UpdateExpression=update_expr,
+        ExpressionAttributeNames=expr_attr_names,
+        ExpressionAttributeValues=expr_attr_values,
+        ReturnValues="ALL_NEW"
+    )
+    
+    return resp.get("Attributes", {})
 

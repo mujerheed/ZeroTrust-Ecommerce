@@ -41,6 +41,7 @@ class ChatbotRouter:
         'cancel_order': r'(?i)^(?:cancel|reject|no)(?:\s+(\S+))?$',  # cancel or cancel ord_123
         'order_status': r'(?i)^(?:order|status)\s+(\S+)$',
         'upload': r'(?i)^(?:upload|receipt)$',
+        'update_address': r'(?i)^(?:address|update address|my address)$',
         'help': r'(?i)^(?:help|\?)$'
     }
     
@@ -131,6 +132,9 @@ class ChatbotRouter:
         elif intent == 'upload':
             return await self.handle_upload_request(sender_id, platform, ceo_id)
         
+        elif intent == 'update_address':
+            return await self.handle_address_update(sender_id, platform, ceo_id, text)
+        
         elif intent == 'help':
             return await self.handle_help(sender_id, platform)
         
@@ -195,18 +199,18 @@ class ChatbotRouter:
                 sender_phone = parsed_message.get('sender_phone')
                 sender_name = parsed_message.get('sender_name', 'Customer')
                 
-                # Create buyer record
-                buyer_data = {
-                    'buyer_id': sender_id,
-                    'platform': platform,
-                    'phone_number': sender_phone,
-                    'name': sender_name,
-                    'ceo_id': ceo_id,
-                    'registered_at': datetime.now(timezone.utc).isoformat(),
-                    'status': 'pending_verification'
-                }
-                
-                create_buyer(buyer_data)
+                # Create buyer record with basic info
+                # Note: Address will be collected later (during order placement or via follow-up)
+                create_buyer(
+                    buyer_id=sender_id,
+                    phone=sender_phone,
+                    platform=platform,
+                    ceo_id=ceo_id,
+                    name=sender_name,
+                    delivery_address=None,  # Will be collected later
+                    email=None,  # Optional, can be added later
+                    meta=parsed_message.get('meta')
+                )
                 
                 # Generate OTP
                 otp = generate_otp('Buyer')
@@ -455,6 +459,9 @@ Available Commands:
 🔐 *verify <code>*
    Verify your OTP code
 
+📍 *address*
+   Update delivery address
+
 ✅ *confirm*
    Confirm your pending order
 
@@ -677,6 +684,125 @@ Thank you! 🙏"""
             
             return {'action': 'error', 'error': str(e), 'platform': platform}
     
+    async def handle_address_update(
+        self,
+        sender_id: str,
+        platform: str,
+        ceo_id: str,
+        text: str
+    ) -> Dict[str, Any]:
+        """
+        Handle delivery address update/collection.
+        
+        For new buyers or buyers updating address:
+        1. Check if buyer has existing address
+        2. If yes, show current address and ask for confirmation or new address
+        3. If no, prompt for address
+        4. Store address in buyer record
+        
+        Args:
+            sender_id: Buyer ID
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+            text: Message text (may contain address if not just command)
+        
+        Returns:
+            Dict with action result
+        """
+        from auth_service.database import update_user
+        
+        try:
+            # Get buyer record
+            buyer = get_buyer_by_id(sender_id)
+            if not buyer:
+                msg = "⚠️ Please register first by typing 'register'"
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, msg)
+                else:
+                    await self.instagram.send_message(sender_id, msg)
+                return {'action': 'not_registered', 'platform': platform}
+            
+            # Check if text contains address (more than just the command)
+            # Simple heuristic: if message is longer than 20 chars, likely contains address
+            address_text = text.strip()
+            if len(address_text) > 20 and not address_text.lower() in ['address', 'update address', 'my address']:
+                # User provided address in the message
+                new_address = address_text
+            else:
+                # User just typed command, show current address or ask for it
+                current_address = buyer.get('delivery_address')
+                
+                if current_address:
+                    # Show current address and ask for confirmation
+                    msg = f"""📍 Your current delivery address:
+
+{current_address}
+
+To update, reply with your new address.
+Or type 'confirm' to keep this address."""
+                else:
+                    # No address on file, prompt for it
+                    msg = """📍 Please provide your delivery address
+
+Include:
+• Street/building number
+• Area/neighborhood
+• City
+• Landmark (optional)
+
+Example: 15 Allen Avenue, Ikeja, Lagos. Near NNPC Station"""
+                
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, msg)
+                else:
+                    await self.instagram.send_message(sender_id, msg)
+                
+                return {
+                    'action': 'address_prompt',
+                    'platform': platform,
+                    'has_address': bool(current_address)
+                }
+            
+            # Update buyer address
+            update_user(sender_id, {'delivery_address': new_address})
+            
+            logger.info(
+                "Buyer address updated",
+                extra={
+                    'buyer_id': sender_id,
+                    'platform': platform,
+                    'ceo_id': ceo_id
+                }
+            )
+            
+            msg = f"""✅ Delivery address updated!
+
+📍 {new_address}
+
+You can update this anytime by typing 'address' followed by your new address."""
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            return {
+                'action': 'address_updated',
+                'platform': platform,
+                'address': new_address
+            }
+        
+        except Exception as e:
+            logger.error(f"Address update failed: {str(e)}")
+            
+            msg = "Sorry, failed to update address. Please try again."
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            return {'action': 'error', 'error': str(e), 'platform': platform}
+    
     async def handle_unknown(
         self,
         sender_id: str,
@@ -701,6 +827,7 @@ Thank you! 🙏"""
 Try these commands:
 • *register* - Create account
 • *verify <code>* - Verify OTP
+• *address* - Update delivery address
 • *confirm* - Confirm order
 • *cancel* - Cancel order
 • *order <id>* - Check order status

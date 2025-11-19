@@ -259,6 +259,123 @@ def authenticate_ceo(email: str, password: str) -> Dict[str, Any]:
     }
 
 
+# ==================== CEO Profile Management ====================
+
+def update_ceo_profile(
+    ceo_id: str,
+    company_name: Optional[str] = None,
+    phone: Optional[str] = None,
+    business_hours: Optional[str] = None,
+    delivery_fee: Optional[float] = None,
+    email: Optional[str] = None,
+    otp: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Update CEO profile information.
+    
+    Sensitive fields (email) require OTP verification.
+    Regular fields (company_name, phone, business_hours, delivery_fee) can be updated directly.
+    
+    Args:
+        ceo_id: CEO identifier
+        company_name: Optional company/business name
+        phone: Optional business phone number
+        business_hours: Optional business operating hours (e.g., "Mon-Fri 9AM-5PM")
+        delivery_fee: Optional default delivery fee in Naira
+        email: Optional new email (requires OTP verification)
+        otp: OTP code (required if updating email)
+    
+    Returns:
+        Updated CEO profile
+    
+    Raises:
+        ValueError: If CEO not found, OTP invalid (for email update), or validation fails
+    """
+    # Verify CEO exists
+    ceo = get_ceo_by_id(ceo_id)
+    if not ceo:
+        raise ValueError(f"CEO {ceo_id} not found")
+    
+    # Build updates dictionary
+    updates = {}
+    
+    # Regular fields (no OTP required)
+    if company_name is not None:
+        if not company_name.strip():
+            raise ValueError("Company name cannot be empty")
+        updates["company_name"] = company_name.strip()
+    
+    if phone is not None:
+        # Validate Nigerian phone format
+        from ceo_service.utils import validate_nigerian_phone
+        if not validate_nigerian_phone(phone):
+            raise ValueError("Invalid Nigerian phone number format")
+        updates["phone"] = phone
+    
+    if business_hours is not None:
+        updates["business_hours"] = business_hours
+    
+    if delivery_fee is not None:
+        if delivery_fee < 0:
+            raise ValueError("Delivery fee cannot be negative")
+        updates["delivery_fee"] = float(delivery_fee)
+    
+    # Sensitive field: email (requires OTP)
+    if email is not None:
+        if not otp:
+            raise ValueError("OTP required to update email address")
+        
+        # Verify OTP
+        from auth_service.otp_manager import verify_otp as verify_otp_code
+        otp_result = verify_otp_code(ceo_id, otp)
+        if not otp_result or not otp_result.get("valid"):
+            logger.warning("CEO profile update failed - invalid OTP", extra={
+                "ceo_id": ceo_id,
+                "attempted_field": "email"
+            })
+            raise ValueError("Invalid or expired OTP")
+        
+        # Validate email format
+        from ceo_service.utils import validate_email
+        if not validate_email(email):
+            raise ValueError("Invalid email format")
+        
+        # Check email uniqueness
+        existing_ceo = get_ceo_by_email(email)
+        if existing_ceo and existing_ceo.get("ceo_id") != ceo_id:
+            raise ValueError("Email already in use by another CEO")
+        
+        updates["email"] = email
+    
+    # If no updates provided
+    if not updates:
+        raise ValueError("No fields to update")
+    
+    # Perform update
+    updated_ceo = update_ceo(ceo_id, updates)
+    
+    # Log audit event
+    write_audit_log(
+        ceo_id=ceo_id,
+        action="ceo_profile_updated",
+        user_id=ceo_id,
+        details={
+            "updated_fields": list(updates.keys()),
+            "required_otp": email is not None
+        }
+    )
+    
+    logger.info("CEO profile updated", extra={
+        "ceo_id": ceo_id,
+        "updated_fields": list(updates.keys())
+    })
+    
+    # Remove sensitive data
+    updated_ceo.pop("password_hash", None)
+    
+    return updated_ceo
+
+
 # ==================== Vendor Management ====================
 
 def onboard_vendor(ceo_id: str, name: str, email: str, phone: str, password: str = None) -> Dict[str, Any]:
