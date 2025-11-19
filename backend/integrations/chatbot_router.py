@@ -27,6 +27,7 @@ from auth_service.database import create_buyer, get_buyer_by_id
 from auth_service.otp_manager import generate_otp, verify_otp, store_otp
 from integrations.whatsapp_api import whatsapp_api
 from integrations.instagram_api import instagram_api
+from ceo_service.ceo_logic import get_chatbot_settings
 
 
 class ChatbotRouter:
@@ -48,6 +49,92 @@ class ChatbotRouter:
     def __init__(self):
         self.whatsapp = whatsapp_api
         self.instagram = instagram_api
+    
+    def get_customized_response(
+        self,
+        ceo_id: str,
+        response_type: str,
+        default_message: str,
+        user_name: str = None
+    ) -> str:
+        """
+        Get customized chatbot response based on CEO settings.
+        
+        Args:
+            ceo_id: CEO ID for fetching settings
+            response_type: Type of response ('welcome', 'greeting', 'thanks', 'goodbye', 'help')
+            default_message: Fallback message if no customization
+            user_name: Optional user name to personalize
+        
+        Returns:
+            Customized message string
+        """
+        try:
+            settings = get_chatbot_settings(ceo_id)
+            
+            # Get the appropriate custom response
+            if response_type == 'welcome' and settings.get('welcome_message'):
+                message = settings['welcome_message']
+            elif response_type in ['greeting', 'thanks', 'goodbye', 'help']:
+                auto_responses = settings.get('auto_responses', {})
+                message = auto_responses.get(response_type, default_message)
+            else:
+                message = default_message
+            
+            # Personalize with user name if provided
+            if user_name and '{name}' in message:
+                message = message.replace('{name}', user_name)
+            
+            # Apply tone adjustments
+            tone = settings.get('tone', 'friendly')
+            message = self.apply_tone(message, tone)
+            
+            return message
+            
+        except Exception as e:
+            logger.warning(f"Failed to get customized response: {str(e)}")
+            return default_message
+    
+    def apply_tone(self, message: str, tone: str) -> str:
+        """
+        Apply tone adjustments to message.
+        
+        Args:
+            message: Original message
+            tone: Tone to apply ('friendly', 'professional', 'casual')
+        
+        Returns:
+            Adjusted message
+        """
+        if tone == 'professional':
+            # Remove excessive punctuation and emojis
+            message = re.sub(r'!+', '.', message)
+            message = re.sub(r'[😊👋🎉🛡️✨]', '', message)
+        elif tone == 'casual':
+            # Add friendly emoji if not present
+            if not any(emoji in message for emoji in ['😊', '👋', '🎉', '✨']):
+                message = message.rstrip() + ' 😊'
+        
+        return message
+    
+    def check_feature_enabled(self, ceo_id: str, feature_name: str) -> bool:
+        """
+        Check if a chatbot feature is enabled for this CEO.
+        
+        Args:
+            ceo_id: CEO ID
+            feature_name: Feature to check (e.g., 'address_collection', 'order_tracking')
+        
+        Returns:
+            True if enabled, False otherwise
+        """
+        try:
+            settings = get_chatbot_settings(ceo_id)
+            enabled_features = settings.get('enabled_features', {})
+            return enabled_features.get(feature_name, True)  # Default to enabled
+        except Exception as e:
+            logger.warning(f"Failed to check feature status: {str(e)}")
+            return True  # Default to enabled on error
     
     def detect_intent(self, text: str) -> Tuple[str, Optional[str]]:
         """
@@ -136,10 +223,10 @@ class ChatbotRouter:
             return await self.handle_address_update(sender_id, platform, ceo_id, text)
         
         elif intent == 'help':
-            return await self.handle_help(sender_id, platform)
+            return await self.handle_help(sender_id, platform, ceo_id)
         
         else:
-            return await self.handle_unknown(sender_id, platform, text)
+            return await self.handle_unknown(sender_id, platform, text, ceo_id)
     
     async def handle_registration(
         self,
@@ -216,12 +303,21 @@ class ChatbotRouter:
                 otp = generate_otp('Buyer')
                 store_otp(sender_id, otp, 'Buyer')
                 
-                # Send welcome message + OTP
+                # Get customized welcome message from CEO settings
+                default_welcome = f"Hi {sender_name}! 👋\n\nThank you for choosing TrustGuard! 🛡️\n\nWe're here to make your online shopping safe and secure."
+                welcome_message = self.get_customized_response(
+                    ceo_id=ceo_id,
+                    response_type='welcome',
+                    default_message=default_welcome,
+                    user_name=sender_name
+                )
+                
+                # Send customized welcome message + OTP
                 if platform == 'whatsapp':
-                    await self.whatsapp.send_welcome_message(sender_id, sender_name)
+                    await self.whatsapp.send_message(sender_id, welcome_message)
                     await self.whatsapp.send_otp(sender_id, otp)
                 else:
-                    await self.instagram.send_welcome_message(sender_id, sender_name)
+                    await self.instagram.send_message(sender_id, welcome_message)
                     await self.instagram.send_otp(sender_id, otp)
                 
                 logger.info(
@@ -366,6 +462,15 @@ Type 'register' to request a new code"""
         Returns:
             Dict with order status
         """
+        # Check if order tracking is enabled
+        if not self.check_feature_enabled(ceo_id, 'order_tracking'):
+            msg = "Sorry, order tracking is currently unavailable. Please contact your vendor directly."
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            return {'action': 'feature_disabled', 'feature': 'order_tracking', 'platform': platform}
+        
         # TODO: Implement order status lookup from database
         logger.info(f"Order status request: {order_id} from {sender_id}")
         
@@ -408,6 +513,15 @@ Type 'help' for other commands"""
         Returns:
             Dict with upload instructions
         """
+        # Check if receipt upload is enabled
+        if not self.check_feature_enabled(ceo_id, 'receipt_upload'):
+            msg = "Sorry, receipt upload is currently unavailable. Please contact your vendor directly."
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            return {'action': 'feature_disabled', 'feature': 'receipt_upload', 'platform': platform}
+        
         logger.info(f"Upload request from {sender_id}")
         
         # Placeholder response
@@ -437,7 +551,8 @@ Type 'help' for other commands"""
     async def handle_help(
         self,
         sender_id: str,
-        platform: str
+        platform: str,
+        ceo_id: str = None
     ) -> Dict[str, Any]:
         """
         Send help message with available commands.
@@ -445,11 +560,17 @@ Type 'help' for other commands"""
         Args:
             sender_id: Buyer ID
             platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID for customization (optional)
         
         Returns:
             Dict with action taken
         """
-        msg = """🛡️ TrustGuard Help
+        # Check if help feature is enabled
+        if ceo_id and not self.check_feature_enabled(ceo_id, 'help'):
+            msg = "Sorry, help is currently unavailable. Please contact support directly."
+        else:
+            # Get customized help message or use default
+            default_help = """🛡️ TrustGuard Help
 
 Available Commands:
 
@@ -483,6 +604,15 @@ Need more help?
 Just message us anytime! We're here to assist. 💬
 
 TrustGuard - Your Shopping Security Partner"""
+            
+            if ceo_id:
+                msg = self.get_customized_response(
+                    ceo_id=ceo_id,
+                    response_type='help',
+                    default_message=default_help
+                )
+            else:
+                msg = default_help
         
         if platform == 'whatsapp':
             await self.whatsapp.send_message(sender_id, msg)
@@ -712,6 +842,15 @@ Thank you! 🙏"""
         from auth_service.database import update_user
         
         try:
+            # Check if address collection is enabled
+            if not self.check_feature_enabled(ceo_id, 'address_collection'):
+                msg = "Sorry, address management is currently unavailable."
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, msg)
+                else:
+                    await self.instagram.send_message(sender_id, msg)
+                return {'action': 'feature_disabled', 'feature': 'address_collection', 'platform': platform}
+            
             # Get buyer record
             buyer = get_buyer_by_id(sender_id)
             if not buyer:
@@ -807,7 +946,8 @@ You can update this anytime by typing 'address' followed by your new address."""
         self,
         sender_id: str,
         platform: str,
-        text: str
+        text: str,
+        ceo_id: str = None
     ) -> Dict[str, Any]:
         """
         Handle unknown/unrecognized messages.
@@ -816,13 +956,14 @@ You can update this anytime by typing 'address' followed by your new address."""
             sender_id: Buyer ID
             platform: 'whatsapp' or 'instagram'
             text: Original message text
+            ceo_id: CEO ID for customization (optional)
         
         Returns:
             Dict with action taken
         """
         logger.info(f"Unknown intent: '{text}' from {sender_id}")
         
-        msg = """❓ I didn't understand that.
+        default_unknown_msg = """❓ I didn't understand that.
 
 Try these commands:
 • *register* - Create account
@@ -835,6 +976,16 @@ Try these commands:
 • *help* - See all commands
 
 Or just ask your question! 💬"""
+        
+        # Get customized response if available
+        if ceo_id:
+            msg = self.get_customized_response(
+                ceo_id=ceo_id,
+                response_type='unknown',
+                default_message=default_unknown_msg
+            )
+        else:
+            msg = default_unknown_msg
         
         if platform == 'whatsapp':
             await self.whatsapp.send_message(sender_id, msg)

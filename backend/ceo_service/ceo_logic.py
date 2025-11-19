@@ -1055,3 +1055,248 @@ def reject_escalation_with_otp(
         'vendor_notified': True
     }
 
+
+# ==================== Chatbot Customization ====================
+
+def get_chatbot_settings(ceo_id: str) -> Dict[str, Any]:
+    """
+    Get chatbot customization settings for a CEO.
+    
+    Args:
+        ceo_id: CEO identifier
+    
+    Returns:
+        Chatbot settings dictionary with defaults
+    """
+    ceo = get_ceo_by_id(ceo_id)
+    if not ceo:
+        raise ValueError(f"CEO {ceo_id} not found")
+    
+    # Return chatbot settings or defaults
+    default_settings = {
+        "welcome_message": "👋 Welcome! How can I help you today?\n\nType 'help' to see available commands.",
+        "business_hours": "Mon-Fri 9AM-6PM",
+        "tone": "friendly",  # Options: friendly, professional, casual
+        "language": "en",  # ISO 639-1 code
+        "auto_responses": {
+            "greeting": "Hello! Welcome to our store. How can I assist you?",
+            "thanks": "You're welcome! Let me know if you need anything else.",
+            "goodbye": "Thank you for shopping with us! Have a great day! 😊"
+        },
+        "enabled_features": {
+            "address_collection": True,
+            "order_tracking": True,
+            "receipt_upload": True,
+            "product_catalog": False  # Future feature
+        }
+    }
+    
+    chatbot_settings = ceo.get("chatbot_settings", default_settings)
+    
+    logger.info("Chatbot settings retrieved", extra={
+        "ceo_id": ceo_id,
+        "tone": chatbot_settings.get("tone"),
+        "language": chatbot_settings.get("language")
+    })
+    
+    return chatbot_settings
+
+
+def update_chatbot_settings(
+    ceo_id: str,
+    welcome_message: Optional[str] = None,
+    business_hours: Optional[str] = None,
+    tone: Optional[str] = None,
+    language: Optional[str] = None,
+    auto_responses: Optional[Dict[str, str]] = None,
+    enabled_features: Optional[Dict[str, bool]] = None
+) -> Dict[str, Any]:
+    """
+    Update chatbot customization settings for a CEO.
+    
+    Args:
+        ceo_id: CEO identifier
+        welcome_message: Custom welcome message
+        business_hours: Business operating hours
+        tone: Chatbot tone (friendly, professional, casual)
+        language: Language code (ISO 639-1)
+        auto_responses: Custom auto-responses dictionary
+        enabled_features: Feature toggles
+    
+    Returns:
+        Updated chatbot settings
+    
+    Raises:
+        ValueError: If CEO not found or validation fails
+    """
+    ceo = get_ceo_by_id(ceo_id)
+    if not ceo:
+        raise ValueError(f"CEO {ceo_id} not found")
+    
+    # Get current settings or defaults
+    current_settings = get_chatbot_settings(ceo_id)
+    
+    # Build updates
+    updates = {}
+    
+    if welcome_message is not None:
+        if len(welcome_message) > 500:
+            raise ValueError("Welcome message too long (max 500 characters)")
+        updates["welcome_message"] = welcome_message.strip()
+    
+    if business_hours is not None:
+        updates["business_hours"] = business_hours.strip()
+    
+    if tone is not None:
+        valid_tones = ["friendly", "professional", "casual"]
+        if tone not in valid_tones:
+            raise ValueError(f"Invalid tone. Must be one of: {', '.join(valid_tones)}")
+        updates["tone"] = tone
+    
+    if language is not None:
+        # Basic validation (ISO 639-1 codes are 2 letters)
+        if len(language) != 2:
+            raise ValueError("Invalid language code. Use ISO 639-1 format (e.g., 'en', 'fr')")
+        updates["language"] = language.lower()
+    
+    if auto_responses is not None:
+        # Validate auto_responses keys
+        valid_keys = ["greeting", "thanks", "goodbye", "error", "unknown"]
+        for key in auto_responses.keys():
+            if key not in valid_keys:
+                raise ValueError(f"Invalid auto_response key: {key}. Valid keys: {', '.join(valid_keys)}")
+        
+        # Merge with current auto_responses
+        current_auto_responses = current_settings.get("auto_responses", {})
+        current_auto_responses.update(auto_responses)
+        updates["auto_responses"] = current_auto_responses
+    
+    if enabled_features is not None:
+        # Validate feature keys
+        valid_features = ["address_collection", "order_tracking", "receipt_upload", "product_catalog"]
+        for key in enabled_features.keys():
+            if key not in valid_features:
+                raise ValueError(f"Invalid feature: {key}. Valid features: {', '.join(valid_features)}")
+        
+        # Merge with current enabled_features
+        current_features = current_settings.get("enabled_features", {})
+        current_features.update(enabled_features)
+        updates["enabled_features"] = current_features
+    
+    if not updates:
+        raise ValueError("No settings to update")
+    
+    # Merge updates with current settings
+    new_settings = {**current_settings, **updates}
+    
+    # Update CEO record
+    update_ceo(ceo_id, {"chatbot_settings": new_settings})
+    
+    # Log audit event
+    write_audit_log(
+        ceo_id=ceo_id,
+        action="chatbot_settings_updated",
+        user_id=ceo_id,
+        details={
+            "updated_fields": list(updates.keys()),
+            "tone": new_settings.get("tone"),
+            "language": new_settings.get("language")
+        }
+    )
+    
+    logger.info("Chatbot settings updated", extra={
+        "ceo_id": ceo_id,
+        "updated_fields": list(updates.keys())
+    })
+    
+    return new_settings
+
+
+def preview_chatbot_conversation(
+    ceo_id: str,
+    user_message: str,
+    settings: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Preview chatbot response with custom settings.
+    
+    Args:
+        ceo_id: CEO identifier
+        user_message: Simulated user message
+        settings: Optional custom settings to preview (if None, uses saved settings)
+    
+    Returns:
+        Preview response with bot message and metadata
+    """
+    # Get settings
+    if settings is None:
+        settings = get_chatbot_settings(ceo_id)
+    
+    # Normalize message
+    message_lower = user_message.lower().strip()
+    
+    # Determine intent and generate response
+    bot_response = ""
+    intent = "unknown"
+    
+    # Check for greetings
+    if any(word in message_lower for word in ["hi", "hello", "hey", "greetings"]):
+        intent = "greeting"
+        bot_response = settings.get("auto_responses", {}).get("greeting", "Hello! How can I help you?")
+    
+    # Check for thanks
+    elif any(word in message_lower for word in ["thanks", "thank you", "thx"]):
+        intent = "thanks"
+        bot_response = settings.get("auto_responses", {}).get("thanks", "You're welcome!")
+    
+    # Check for goodbye
+    elif any(word in message_lower for word in ["bye", "goodbye", "see you"]):
+        intent = "goodbye"
+        bot_response = settings.get("auto_responses", {}).get("goodbye", "Goodbye! Have a great day!")
+    
+    # Check for help
+    elif "help" in message_lower:
+        intent = "help"
+        bot_response = (
+            "Here are the commands I understand:\n\n"
+            "📦 *order* - Place a new order\n"
+            "📍 *address* - Update delivery address\n"
+            "📷 *receipt* - Upload payment receipt\n"
+            "🔍 *track* - Track your order\n"
+            "❓ *help* - Show this message"
+        )
+    
+    # Unknown intent
+    else:
+        intent = "unknown"
+        bot_response = settings.get("auto_responses", {}).get(
+            "unknown",
+            "I'm not sure I understand. Type 'help' to see available commands."
+        )
+    
+    # Apply tone adjustments
+    tone = settings.get("tone", "friendly")
+    if tone == "professional":
+        bot_response = bot_response.replace("!", ".")
+        bot_response = bot_response.replace("😊", "")
+    elif tone == "casual":
+        if not any(emoji in bot_response for emoji in ["😊", "👋", "📦"]):
+            bot_response += " 😊"
+    
+    logger.info("Chatbot conversation previewed", extra={
+        "ceo_id": ceo_id,
+        "intent": intent,
+        "tone": tone
+    })
+    
+    return {
+        "user_message": user_message,
+        "bot_response": bot_response,
+        "intent": intent,
+        "settings_preview": {
+            "tone": settings.get("tone"),
+            "language": settings.get("language"),
+            "business_hours": settings.get("business_hours")
+        }
+    }
+

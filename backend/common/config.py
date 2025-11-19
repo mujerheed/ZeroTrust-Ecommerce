@@ -63,8 +63,10 @@ class Settings(BaseSettings):
     HIGH_VALUE_THRESHOLD: int = 1000000  # ₦1,000,000
     
     # Meta Platform Integration (WhatsApp & Instagram)
+    META_APP_ID: str = "dev_meta_app_id"
     META_APP_SECRET: str = "dev_meta_app_secret"
     META_WEBHOOK_VERIFY_TOKEN: str = "trustguard_verify_2025"
+    META_OAUTH_REDIRECT_URI: str = "http://localhost:8000/ceo/oauth/meta/callback"
     WHATSAPP_ACCESS_TOKEN: str = ""
     WHATSAPP_PHONE_NUMBER_ID: str = ""
     INSTAGRAM_ACCESS_TOKEN: str = ""

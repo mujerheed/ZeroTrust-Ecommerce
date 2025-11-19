@@ -8,10 +8,14 @@ This module provides endpoints for:
 - Dashboard metrics and reporting
 - Audit log access
 - Multi-CEO tenancy enforcement
+- OAuth Meta Connection (WhatsApp/Instagram)
 """
 
+import os
+import time
 from fastapi import APIRouter, HTTPException, Depends, status, Query
 from fastapi.security import HTTPBearer
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr
 from typing import List, Dict, Any, Optional
 from .ceo_logic import (
@@ -20,7 +24,10 @@ from .ceo_logic import (
     get_dashboard_metrics,
     get_pending_approvals, approve_order, reject_order, request_approval_otp,
     get_audit_logs_for_ceo,
-    update_ceo_profile
+    update_ceo_profile,
+    get_chatbot_settings,
+    update_chatbot_settings,
+    preview_chatbot_conversation
 )
 from .utils import format_response, verify_ceo_token
 from common.logger import logger
@@ -75,6 +82,20 @@ class CEOProfileUpdateRequest(BaseModel):
     delivery_fee: Optional[float] = None
     email: Optional[EmailStr] = None
     otp: Optional[str] = None  # Required if updating email
+
+
+class ChatbotSettingsUpdateRequest(BaseModel):
+    welcome_message: Optional[str] = None
+    business_hours: Optional[str] = None
+    tone: Optional[str] = None  # friendly, professional, casual
+    language: Optional[str] = None  # ISO 639-1 code (e.g., "en", "fr")
+    auto_responses: Optional[Dict[str, str]] = None
+    enabled_features: Optional[Dict[str, bool]] = None
+
+
+class ChatbotPreviewRequest(BaseModel):
+    user_message: str
+    settings: Optional[Dict[str, Any]] = None  # Optional custom settings to preview
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
@@ -338,3 +359,452 @@ async def get_audit_logs_endpoint(limit: int = Query(100, description="Maximum n
     except Exception as e:
         logger.error("Get audit logs failed", extra={"ceo_id": ceo_id, "error": str(e)})
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve audit logs")
+
+
+# ==================== OAuth Meta Connection Routes ====================
+
+from fastapi.responses import RedirectResponse
+from .oauth_meta import (
+    get_authorization_url,
+    handle_oauth_callback,
+    get_connection_status,
+    revoke_connection
+)
+
+
+class OAuthCallbackResponse(BaseModel):
+    code: str
+    state: str
+
+
+@router.get("/oauth/meta/authorize")
+async def oauth_authorize_endpoint(
+    platform: str = Query(..., description="Platform to connect: 'whatsapp' or 'instagram'"),
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Initiate Meta OAuth flow.
+    
+    Redirects CEO to Meta's OAuth consent screen for WhatsApp or Instagram.
+    
+    **Query Parameters:**
+    - `platform`: 'whatsapp' or 'instagram'
+    
+    **Returns:**
+    - Redirect to Meta OAuth authorization URL
+    
+    **Example:**
+    ```
+    GET /ceo/oauth/meta/authorize?platform=whatsapp
+    Authorization: Bearer <JWT_TOKEN>
+    ```
+    """
+    try:
+        # Build redirect URI (your application's callback URL)
+        from fastapi import Request
+        # In production, use configured callback URL from environment
+        redirect_uri = f"{os.getenv('OAUTH_CALLBACK_BASE_URL', 'http://localhost:8000')}/ceo/oauth/meta/callback"
+        
+        # Generate authorization URL
+        auth_url = get_authorization_url(ceo_id, platform, redirect_uri)
+        
+        logger.info("OAuth authorization initiated", extra={
+            "ceo_id": ceo_id,
+            "platform": platform
+        })
+        
+        # Redirect to Meta OAuth consent screen
+        return RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
+    
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error("OAuth authorization failed", extra={
+            "ceo_id": ceo_id,
+            "platform": platform,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to initiate OAuth")
+
+
+@router.get("/oauth/meta/callback")
+async def oauth_callback_endpoint(
+    code: str = Query(..., description="Authorization code from Meta"),
+    state: str = Query(..., description="State token for CSRF protection")
+):
+    """
+    Handle OAuth callback from Meta.
+    
+    Meta redirects here after user grants/denies permission.
+    Exchanges authorization code for access token and stores in Secrets Manager.
+    
+    **Query Parameters:**
+    - `code`: Authorization code from Meta
+    - `state`: State token (CSRF protection)
+    
+    **Returns:**
+    - Connection status with expiry info
+    
+    **Example:**
+    ```
+    GET /ceo/oauth/meta/callback?code=ABC123&state=XYZ789
+    ```
+    
+    **Note:** This endpoint is called by Meta, not directly by the frontend.
+    """
+    try:
+        # Build redirect URI (must match authorization request)
+        redirect_uri = f"{os.getenv('OAUTH_CALLBACK_BASE_URL', 'http://localhost:8000')}/ceo/oauth/meta/callback"
+        
+        # Handle callback (validates state, exchanges code for token, stores token)
+        connection_data = handle_oauth_callback(code, state, redirect_uri)
+        
+        logger.info("OAuth callback handled successfully", extra={
+            "ceo_id": connection_data["ceo_id"],
+            "platform": connection_data["platform"]
+        })
+        
+        # Redirect to frontend success page
+        frontend_redirect = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/ceo/oauth/success?platform={connection_data['platform']}"
+        
+        return RedirectResponse(url=frontend_redirect, status_code=status.HTTP_302_FOUND)
+    
+    except ValueError as e:
+        # Redirect to frontend error page
+        frontend_error = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/ceo/oauth/error?error={str(e)}"
+        return RedirectResponse(url=frontend_error, status_code=status.HTTP_302_FOUND)
+    except Exception as e:
+        logger.error("OAuth callback failed", extra={"error": str(e)})
+        frontend_error = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/ceo/oauth/error?error=callback_failed"
+        return RedirectResponse(url=frontend_error, status_code=status.HTTP_302_FOUND)
+
+
+@router.get("/oauth/meta/status")
+async def oauth_status_endpoint(
+    platform: str = Query(..., description="Platform to check: 'whatsapp' or 'instagram'"),
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Check Meta OAuth connection status.
+    
+    Returns connection status, expiry info, and whether token needs refresh.
+    
+    **Query Parameters:**
+    - `platform`: 'whatsapp' or 'instagram'
+    
+    **Returns:**
+    - Connection status with:
+      - `connected`: boolean
+      - `connected_at`: timestamp
+      - `expires_at`: timestamp
+      - `days_until_expiry`: number
+      - `needs_refresh`: boolean (true if < 7 days until expiry)
+    
+    **Example:**
+    ```
+    GET /ceo/oauth/meta/status?platform=whatsapp
+    Authorization: Bearer <JWT_TOKEN>
+    
+    Response:
+    {
+      "status": "success",
+      "message": "Connection status retrieved",
+      "data": {
+        "platform": "whatsapp",
+        "connected": true,
+        "connected_at": 1700400000,
+        "expires_at": 1705584000,
+        "days_until_expiry": 45,
+        "needs_refresh": false
+      }
+    }
+    ```
+    """
+    try:
+        status_data = get_connection_status(ceo_id, platform)
+        
+        return format_response("success", "Connection status retrieved", status_data)
+    
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error("Get OAuth status failed", extra={
+            "ceo_id": ceo_id,
+            "platform": platform,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get connection status")
+
+
+@router.post("/oauth/meta/revoke")
+async def oauth_revoke_endpoint(
+    platform: str = Query(..., description="Platform to disconnect: 'whatsapp' or 'instagram'"),
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Revoke Meta OAuth connection.
+    
+    Deletes access token from Secrets Manager and updates CEO record.
+    
+    **Query Parameters:**
+    - `platform`: 'whatsapp' or 'instagram'
+    
+    **Returns:**
+    - Disconnection confirmation
+    
+    **Example:**
+    ```
+    POST /ceo/oauth/meta/revoke?platform=whatsapp
+    Authorization: Bearer <JWT_TOKEN>
+    
+    Response:
+    {
+      "status": "success",
+      "message": "WhatsApp connection revoked",
+      "data": {
+        "platform": "whatsapp",
+        "connected": false,
+        "disconnected_at": 1700400000
+      }
+    }
+    ```
+    """
+    try:
+        revoke_connection(ceo_id, platform)
+        
+        logger.info("OAuth connection revoked via API", extra={
+            "ceo_id": ceo_id,
+            "platform": platform
+        })
+        
+        return format_response(
+            "success",
+            f"{platform.capitalize()} connection revoked",
+            {
+                "platform": platform,
+                "connected": False,
+                "disconnected_at": int(time.time())
+            }
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error("Revoke OAuth connection failed", extra={
+            "ceo_id": ceo_id,
+            "platform": platform,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to revoke connection")
+
+
+# ==================== Chatbot Customization Endpoints ====================
+
+@router.get("/chatbot-settings")
+async def get_chatbot_settings_endpoint(ceo_id: str = Depends(get_current_ceo)):
+    """
+    Get chatbot customization settings.
+    
+    Returns current chatbot settings for the CEO including:
+    - Welcome message
+    - Business hours
+    - Tone (friendly, professional, casual)
+    - Language
+    - Auto-responses
+    - Enabled features
+    
+    Example:
+    ```
+    GET /ceo/chatbot-settings
+    Authorization: Bearer <JWT_TOKEN>
+    
+    Response:
+    {
+      "status": "success",
+      "message": "Chatbot settings retrieved",
+      "data": {
+        "welcome_message": "Welcome! How can I help you?",
+        "business_hours": "Mon-Fri 9AM-6PM",
+        "tone": "friendly",
+        "language": "en",
+        "auto_responses": {
+          "greeting": "Hello! Welcome to our store.",
+          "thanks": "You're welcome!",
+          "goodbye": "Have a great day!"
+        },
+        "enabled_features": {
+          "address_collection": true,
+          "order_tracking": true,
+          "receipt_upload": true
+        }
+      }
+    }
+    ```
+    """
+    try:
+        settings = get_chatbot_settings(ceo_id)
+        
+        logger.info("Chatbot settings retrieved via API", extra={"ceo_id": ceo_id})
+        
+        return format_response(
+            "success",
+            "Chatbot settings retrieved",
+            settings
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error("Get chatbot settings failed", extra={
+            "ceo_id": ceo_id,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve settings")
+
+
+@router.patch("/chatbot-settings")
+async def update_chatbot_settings_endpoint(
+    req: ChatbotSettingsUpdateRequest,
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Update chatbot customization settings.
+    
+    Updates chatbot behavior and appearance:
+    - welcome_message: Custom greeting message (max 500 chars)
+    - business_hours: Operating hours text
+    - tone: Chatbot personality (friendly/professional/casual)
+    - language: ISO 639-1 language code
+    - auto_responses: Custom responses for common intents
+    - enabled_features: Toggle chatbot features on/off
+    
+    Example:
+    ```
+    PATCH /ceo/chatbot-settings
+    Authorization: Bearer <JWT_TOKEN>
+    Content-Type: application/json
+    
+    {
+      "welcome_message": "👋 Welcome to Alice's Store! How may I assist you today?",
+      "tone": "professional",
+      "auto_responses": {
+        "greeting": "Good day! Welcome to our store.",
+        "thanks": "You are most welcome."
+      }
+    }
+    
+    Response:
+    {
+      "status": "success",
+      "message": "Chatbot settings updated",
+      "data": {
+        "welcome_message": "👋 Welcome to Alice's Store!...",
+        "tone": "professional",
+        "updated_at": 1700400000
+      }
+    }
+    ```
+    """
+    try:
+        updated_settings = update_chatbot_settings(
+            ceo_id=ceo_id,
+            welcome_message=req.welcome_message,
+            business_hours=req.business_hours,
+            tone=req.tone,
+            language=req.language,
+            auto_responses=req.auto_responses,
+            enabled_features=req.enabled_features
+        )
+        
+        logger.info("Chatbot settings updated via API", extra={"ceo_id": ceo_id})
+        
+        return format_response(
+            "success",
+            "Chatbot settings updated",
+            {
+                **updated_settings,
+                "updated_at": int(time.time())
+            }
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error("Update chatbot settings failed", extra={
+            "ceo_id": ceo_id,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update settings")
+
+
+@router.post("/chatbot/preview")
+async def preview_chatbot_endpoint(
+    req: ChatbotPreviewRequest,
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Preview chatbot response with custom settings.
+    
+    Simulates a chatbot conversation to preview how the bot
+    will respond with current or custom settings.
+    
+    Use this to test chatbot behavior before saving changes.
+    
+    Example:
+    ```
+    POST /ceo/chatbot/preview
+    Authorization: Bearer <JWT_TOKEN>
+    Content-Type: application/json
+    
+    {
+      "user_message": "Hello!",
+      "settings": {
+        "tone": "professional",
+        "auto_responses": {
+          "greeting": "Good day, how may I assist you?"
+        }
+      }
+    }
+    
+    Response:
+    {
+      "status": "success",
+      "message": "Chatbot response preview",
+      "data": {
+        "user_message": "Hello!",
+        "bot_response": "Good day, how may I assist you?",
+        "intent": "greeting",
+        "settings_preview": {
+          "tone": "professional",
+          "language": "en"
+        }
+      }
+    }
+    ```
+    """
+    try:
+        preview = preview_chatbot_conversation(
+            ceo_id=ceo_id,
+            user_message=req.user_message,
+            settings=req.settings
+        )
+        
+        logger.info("Chatbot preview generated via API", extra={
+            "ceo_id": ceo_id,
+            "intent": preview.get("intent")
+        })
+        
+        return format_response(
+            "success",
+            "Chatbot response preview",
+            preview
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error("Chatbot preview failed", extra={
+            "ceo_id": ceo_id,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate preview")
