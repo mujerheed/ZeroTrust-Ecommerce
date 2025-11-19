@@ -27,7 +27,7 @@ import boto3
 import re
 from typing import Dict, Any, Optional
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Initialize AWS clients
 textract = boto3.client('textract')
@@ -233,7 +233,7 @@ class ReceiptOCRExtractor:
                 'block_count': analysis['block_count'],
                 'textract_confidence': analysis['avg_confidence'],
                 'extraction_confidence': overall_confidence,
-                'extracted_at': datetime.utcnow().isoformat(),
+                'extracted_at': datetime.now(timezone.utc).isoformat(),
                 'fields_found': {
                     'amount': amount is not None,
                     'bank': bank is not None,

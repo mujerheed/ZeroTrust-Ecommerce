@@ -17,7 +17,7 @@ import requests
 import json
 import jwt
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from common.config import settings
 
@@ -61,13 +61,13 @@ def print_info(message):
 
 def create_jwt(user_id, role, ceo_id=None):
     """Create JWT token for authentication."""
-    exp_time = datetime.utcnow() + timedelta(hours=1)
+    exp_time = datetime.now(timezone.utc) + timedelta(hours=1)
     
     payload = {
         'sub': user_id,
         'role': role,
         'jti': f'test-{role.lower()}-{int(time.time())}',
-        'iat': datetime.utcnow(),
+        'iat': datetime.now(timezone.utc),
         'exp': exp_time
     }
     
