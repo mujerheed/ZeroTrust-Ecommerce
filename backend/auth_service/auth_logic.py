@@ -2,7 +2,10 @@
 Authentication business logic.
 """
 from time import time
-from .database import get_user, anonymize_buyer_data, log_event, get_buyer_by_id
+from .database import (
+    get_user, anonymize_buyer_data, log_event, get_buyer_by_id,
+    get_user_by_phone, get_user_by_email
+)
 from .otp_manager import request_otp, verify_otp, generate_otp, store_otp
 from .token_manager import create_jwt
 from common.logger import logger
@@ -19,34 +22,156 @@ def register_ceo(name: str, phone: str, email: str) -> dict:
     return {"ceo_id": ceo_id, "status": "pending_verification"}
 
 
-def login_ceo(phone: str) -> dict:
+def login_ceo(contact: str) -> str:
     """
     Initiate CEO login via OTP.
+    
+    Args:
+        contact: Phone number or email address
+    
+    Returns:
+        ceo_id if user found and OTP sent
+    
+    Raises:
+        ValueError: If CEO not found or inactive
     """
-    # TODO: Fetch CEO by phone from DynamoDB
-    # For now, mock response
-    return {"status": "otp_sent", "message": "OTP sent to your phone"}
+    # Determine if contact is email or phone
+    is_email = "@" in contact
+    
+    # Look up CEO in database
+    if is_email:
+        ceo = get_user_by_email(contact, role="CEO")
+    else:
+        ceo = get_user_by_phone(contact, role="CEO")
+    
+    if not ceo:
+        logger.warning(f"CEO login attempt with unknown contact: {contact[:4]}***")
+        raise ValueError("CEO account not found. Please register first.")
+    
+    ceo_id = ceo.get("user_id")
+    
+    # Check if CEO account is active
+    if ceo.get("status") != "active":
+        logger.warning(f"Inactive CEO login attempt: {ceo_id}")
+        raise ValueError("CEO account is not active. Please contact support.")
+    
+    # Generate and send OTP using request_otp helper
+    try:
+        result = request_otp(
+            user_id=ceo_id,
+            role="CEO",
+            contact=contact,
+            platform=None,
+            phone=ceo.get("phone") if is_email else contact
+        )
+        
+        logger.info(f"CEO OTP sent successfully", extra={
+            "ceo_id": ceo_id,
+            "delivery_method": result.get("delivery_method")
+        })
+        
+        return ceo_id
+    except Exception as e:
+        logger.error(f"Failed to send CEO OTP: {e}", extra={"ceo_id": ceo_id})
+        raise ValueError(f"Failed to send OTP: {str(e)}")
 
 
-def login_vendor(phone: str) -> dict:
+def login_vendor(phone: str) -> str:
     """
     Initiate vendor login via OTP.
+    
+    Args:
+        phone: Vendor's registered phone number
+    
+    Returns:
+        vendor_id if user found and OTP sent
+    
+    Raises:
+        ValueError: If vendor not found or inactive
     """
-    # TODO: Fetch vendor by phone from DynamoDB
-    return {"status": "otp_sent", "message": "OTP sent to your phone"}
+    # Look up vendor in database
+    vendor = get_user_by_phone(phone, role="Vendor")
+    
+    if not vendor:
+        logger.warning(f"Vendor login attempt with unknown phone: {phone[:4]}***")
+        raise ValueError("Vendor account not found. Please contact your CEO to register.")
+    
+    vendor_id = vendor.get("user_id")
+    
+    # Check if vendor account is active
+    if vendor.get("status") != "active":
+        logger.warning(f"Inactive vendor login attempt: {vendor_id}")
+        raise ValueError("Vendor account is not active. Please contact your CEO.")
+    
+    # Generate and send OTP using request_otp helper
+    try:
+        result = request_otp(
+            user_id=vendor_id,
+            role="Vendor",
+            contact=phone,
+            platform=None,
+            phone=phone
+        )
+        
+        logger.info(f"Vendor OTP sent successfully", extra={
+            "vendor_id": vendor_id,
+            "delivery_method": result.get("delivery_method")
+        })
+        
+        return vendor_id
+    except Exception as e:
+        logger.error(f"Failed to send Vendor OTP: {e}", extra={"vendor_id": vendor_id})
+        raise ValueError(f"Failed to send OTP: {str(e)}")
 
 
-def verify_otp_universal(user_id: str, otp: str, role: str) -> dict:
+def verify_otp_universal(user_id: str, otp: str) -> dict:
     """
     Universal OTP verification for all user types.
     Returns JWT token if valid.
-    """
-    result = verify_otp(user_id, otp)
-    if not result.get("valid"):
-        return {"valid": False, "message": "Invalid or expired OTP"}
     
-    # Generate JWT token
-    token = create_jwt(user_id, role)
+    Args:
+        user_id: User ID (ceo_id, vendor_id, or buyer_id)
+        otp: OTP code to verify
+    
+    Returns:
+        Dict with validation result, token, and role
+    
+    Raises:
+        ValueError: If OTP is invalid or user not found
+    """
+    logger.info(f"[DEBUG] verify_otp_universal: user_id={user_id}, otp_length={len(otp)}")
+    
+    # Verify OTP
+    logger.info(f"[DEBUG] Calling verify_otp from otp_manager")
+    result = verify_otp(user_id, otp)
+    logger.info(f"[DEBUG] verify_otp result: {result}")
+    
+    if not result.get("valid"):
+        error_msg = result.get("error", "Invalid or expired OTP")
+        logger.warning(f"[DEBUG] OTP invalid: {error_msg}")
+        raise ValueError(error_msg)
+    
+    # Get role from OTP verification result
+    role = result.get("role")
+    if not role:
+        logger.error(f"OTP verified but no role returned: {user_id}")
+        raise ValueError("Role not found in OTP record")
+    
+    # Get user's ceo_id for multi-tenancy support
+    user = get_user(user_id)
+    ceo_id = None
+    if user:
+        ceo_id = user.get("ceo_id")
+    
+    logger.info(f"[DEBUG] Creating JWT token for user_id={user_id}, role={role}, ceo_id={ceo_id}")
+    # Generate JWT token with ceo_id for multi-tenancy
+    token = create_jwt(user_id, role, ceo_id=ceo_id)
+    
+    logger.info(f"OTP verified successfully", extra={
+        "user_id": user_id,
+        "role": role
+    })
+    
     return {"valid": True, "token": token, "role": role}
 
 

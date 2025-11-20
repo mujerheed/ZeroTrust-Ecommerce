@@ -36,8 +36,8 @@ class RequestUploadRequest(BaseModel):
     buyer_id: str
     vendor_id: str
     ceo_id: str
-    file_extension: str  # jpg, png, pdf
-    content_type: str  # image/jpeg, image/png, application/pdf
+    file_extension: str  # jpg, png, pdf, heic, webp
+    content_type: str  # image/jpeg, image/png, image/heic, image/webp, application/pdf
 
 
 class ConfirmUploadRequest(BaseModel):
@@ -62,6 +62,10 @@ class VerifyReceiptRequest(BaseModel):
 async def request_upload(req: RequestUploadRequest):
     """
     Generate presigned S3 URL for buyer to upload receipt.
+    
+    Supported formats:
+    - Images: JPEG, PNG, HEIC (iOS), WebP
+    - Documents: PDF (bank receipts)
     
     Security:
     - URL expires in 5 minutes

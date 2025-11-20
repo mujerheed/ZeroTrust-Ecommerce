@@ -60,6 +60,7 @@ WhatsApp:
 ??? Paste callback URL and verify token
 ??? Click "Verify and Save" (should show green checkmark ???)
 ??? Subscribe to webhook fields
+
 ??? Copy access token and phone number ID
 ??? Run: python seed_secrets.py --whatsapp-token <TOKEN> --whatsapp-phone-id <ID>
 

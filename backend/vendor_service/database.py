@@ -18,38 +18,46 @@ AUDIT_LOGS_TABLE = dynamodb.Table(settings.AUDIT_LOGS_TABLE)
 VENDOR_PREFERENCES_TABLE = dynamodb.Table(settings.VENDOR_PREFERENCES_TABLE)
 
 def get_vendor(vendor_id: str) -> Optional[Dict]:
-    """Get vendor details by vendor_id."""
+    """Get vendor details by vendor_id. Supports multi-role users."""
     table = USERS_TABLE
     response = table.get_item(Key={"user_id": vendor_id})
     vendor = response.get("Item")
     
+    if not vendor:
+        logger.info("Vendor not found", extra={"vendor_id": vendor_id})
+        return None
+    
+    # Check if user has Vendor role (either in role field or roles array for multi-role support)
+    has_vendor_role = (
+        vendor.get("role") == "Vendor" or 
+        "Vendor" in vendor.get("roles", [])
+    )
+    
     logger.info("Vendor lookup", extra={
         "vendor_id": vendor_id, 
-        "found": vendor is not None
+        "found": has_vendor_role,
+        "role": vendor.get("role"),
+        "roles": vendor.get("roles", [])
     })
 
-    return vendor if vendor and vendor.get("role") == "Vendor" else None
+    return vendor if has_vendor_role else None
 
 def get_vendor_assigned_orders(vendor_id: str, status: str = None) -> List[Dict]:
     """Get all orders assigned to a specific vendor."""
     table = ORDERS_TABLE
     
-    # Query orders assigned to this vendor
+    # Scan with filter (TODO: add VendorIndex GSI for better performance)
+    filter_expression = "vendor_id = :vendor_id"
+    expression_values = {":vendor_id": vendor_id}
+    
     if status:
-        response = table.query(
-            IndexName="VendorStatusIndex",  # GSI needed in CloudFormation
-            KeyConditionExpression="vendor_id = :vendor_id AND order_status = :status",
-            ExpressionAttributeValues={
-                ":vendor_id": vendor_id,
-                ":status": status
-            }
-        )
-    else:
-        response = table.query(
-            IndexName="VendorIndex",  # GSI needed in CloudFormation
-            KeyConditionExpression="vendor_id = :vendor_id",
-            ExpressionAttributeValues={":vendor_id": vendor_id}
-        )
+        filter_expression += " AND order_status = :status"
+        expression_values[":status"] = status
+    
+    response = table.scan(
+        FilterExpression=filter_expression,
+        ExpressionAttributeValues=expression_values
+    )
     
     return response.get("Items", [])
 
@@ -122,3 +130,44 @@ def log_vendor_action(vendor_id: str, action: str, order_id: str = None, details
         "action": action,
         "order_id": order_id
     })
+
+
+def get_vendor_preferences(vendor_id: str) -> Optional[Dict]:
+    """Get vendor preferences from DynamoDB."""
+    try:
+        response = VENDOR_PREFERENCES_TABLE.get_item(Key={"vendor_id": vendor_id})
+        preferences = response.get("Item")
+        
+        logger.info("Vendor preferences lookup", extra={
+            "vendor_id": vendor_id,
+            "found": preferences is not None
+        })
+        
+        return preferences
+    except Exception as e:
+        logger.error(f"Error getting vendor preferences: {e}", extra={"vendor_id": vendor_id})
+        return None
+
+
+def save_vendor_preferences(vendor_id: str, preferences: Dict) -> bool:
+    """Save vendor preferences to DynamoDB."""
+    try:
+        item = {
+            "vendor_id": vendor_id,
+            "updated_at": int(time.time()),
+            **preferences
+        }
+        
+        VENDOR_PREFERENCES_TABLE.put_item(Item=item)
+        
+        logger.info("Vendor preferences saved", extra={
+            "vendor_id": vendor_id,
+            "preferences": preferences
+        })
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error saving vendor preferences: {e}", extra={
+            "vendor_id": vendor_id
+        })
+        return False

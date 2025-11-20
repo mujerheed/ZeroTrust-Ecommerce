@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     CONVERSATION_STATE_TABLE: str = "TrustGuard-ConversationState"
     CEO_CONFIG_TABLE: str = "TrustGuard-CEOConfig"
     VENDOR_PREFERENCES_TABLE: str = "TrustGuard-VendorPreferences"
+    NEGOTIATIONS_TABLE: str = "TrustGuard-Negotiations"
     
     # S3
     RECEIPT_BUCKET: str = "trustguard-receipts"

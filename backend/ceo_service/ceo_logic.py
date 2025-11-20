@@ -246,6 +246,7 @@ def update_ceo_profile(
     phone: Optional[str] = None,
     business_hours: Optional[str] = None,
     delivery_fee: Optional[float] = None,
+    bank_details: Optional[Dict[str, str]] = None,
     email: Optional[str] = None,
     otp: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -253,7 +254,7 @@ def update_ceo_profile(
     Update CEO profile information.
     
     Sensitive fields (email) require OTP verification.
-    Regular fields (company_name, phone, business_hours, delivery_fee) can be updated directly.
+    Regular fields (company_name, phone, business_hours, delivery_fee, bank_details) can be updated directly.
     
     Args:
         ceo_id: CEO identifier
@@ -261,6 +262,7 @@ def update_ceo_profile(
         phone: Optional business phone number
         business_hours: Optional business operating hours (e.g., "Mon-Fri 9AM-5PM")
         delivery_fee: Optional default delivery fee in Naira
+        bank_details: Optional bank account info (bank_name, account_number, account_name)
         email: Optional new email (requires OTP verification)
         otp: OTP code (required if updating email)
     
@@ -298,6 +300,20 @@ def update_ceo_profile(
         if delivery_fee < 0:
             raise ValueError("Delivery fee cannot be negative")
         updates["delivery_fee"] = Decimal(str(delivery_fee))
+    
+    if bank_details is not None:
+        # Validate bank details
+        if not isinstance(bank_details, dict):
+            raise ValueError("bank_details must be a dictionary")
+        required_fields = ["bank_name", "account_number", "account_name"]
+        for field in required_fields:
+            if field not in bank_details:
+                raise ValueError(f"bank_details missing required field: {field}")
+        if len(bank_details["account_number"]) != 10:
+            raise ValueError("account_number must be exactly 10 digits")
+        if not bank_details["account_number"].isdigit():
+            raise ValueError("account_number must contain only digits")
+        updates["bank_details"] = bank_details
     
     # Sensitive field: email (requires OTP)
     if email is not None:

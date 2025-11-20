@@ -126,11 +126,17 @@ async def verify_otp(request: Request, req: VerifyOTPRequest):
     Universal OTP verification for CEO and Vendor.
     Buyer OTP verification handled by webhook bot.
     """
+    from common.logger import logger
+    logger.info(f"[DEBUG] verify_otp called: user_id={req.user_id}, otp={'*' * len(req.otp)}")
+    
     try:
+        logger.info(f"[DEBUG] Checking rate limit for {request.client.host}")
         rate_limit_check(request.client.host, "otp_verify", max_attempts=3, window_minutes=10)
         
+        logger.info(f"[DEBUG] Calling verify_otp_universal for user_id={req.user_id}")
         result = verify_otp_universal(req.user_id, req.otp)
         
+        logger.info(f"[DEBUG] OTP verified successfully for user_id={req.user_id}, role={result.get('role')}")
         log_security_event(req.user_id, "OTP_VERIFIED_SUCCESS", {
             "ip": request.client.host,
             "role": result["role"]
@@ -143,6 +149,7 @@ async def verify_otp(request: Request, req: VerifyOTPRequest):
         })
         
     except Exception as e:
+        logger.error(f"[DEBUG] OTP verification failed: {type(e).__name__}: {str(e)}", exc_info=True)
         log_security_event(req.user_id, "OTP_VERIFICATION_FAILED", {
             "ip": request.client.host,
             "error": str(e)

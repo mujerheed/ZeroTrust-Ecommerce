@@ -11,6 +11,7 @@ Handles all database interactions for orders:
 
 import time
 import uuid
+from decimal import Decimal
 from typing import Dict, Any, List, Optional
 from common.config import settings
 from common.db_connection import dynamodb
@@ -40,9 +41,11 @@ def create_order(
     buyer_id: str,
     ceo_id: str,
     items: List[Dict[str, Any]],
-    total_amount: float,
+    total_amount: Decimal,
     currency: str = "NGN",
-    notes: Optional[str] = None
+    notes: Optional[str] = None,
+    requires_delivery: bool = False,
+    delivery_address: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Create a new order in DynamoDB.
@@ -52,9 +55,11 @@ def create_order(
         buyer_id (str): Buyer for this order (wa_xxx or ig_xxx)
         ceo_id (str): CEO who owns this business (multi-tenancy)
         items (List[Dict]): Order items with name, quantity, price
-        total_amount (float): Total order amount in NGN
+        total_amount (Decimal): Total order amount in NGN
         currency (str): Currency code (default: NGN)
         notes (str, optional): Additional notes for the order
+        requires_delivery (bool): Whether buyer wants delivery
+        delivery_address (Dict, optional): Delivery address if required
     
     Returns:
         Dict[str, Any]: Created order record
@@ -65,7 +70,9 @@ def create_order(
         ...     buyer_id="wa_2348012345678",
         ...     ceo_id="ceo_456",
         ...     items=[{"name": "Product A", "quantity": 2, "price": 5000}],
-        ...     total_amount=10000
+        ...     total_amount=Decimal("10000"),
+        ...     requires_delivery=True,
+        ...     delivery_address={"city": "Lagos", ...}
         ... )
         {
             "order_id": "ord_1700000000_a1b2c3d4",
@@ -73,9 +80,11 @@ def create_order(
             "buyer_id": "wa_2348012345678",
             "ceo_id": "ceo_456",
             "items": [...],
-            "total_amount": 10000,
+            "total_amount": Decimal("10000"),
             "currency": "NGN",
             "status": "pending",
+            "requires_delivery": True,
+            "delivery_address": {...},
             "created_at": 1700000000,
             "updated_at": 1700000000
         }
@@ -84,15 +93,31 @@ def create_order(
     order_id = generate_order_id()
     now = int(time.time())
     
+    # Convert items to use Decimal for DynamoDB compatibility
+    decimal_items = []
+    for item in items:
+        decimal_item = {
+            "name": item["name"],
+            "quantity": Decimal(str(item["quantity"])),
+            "price": Decimal(str(item["price"]))
+        }
+        # Preserve optional fields
+        if "description" in item:
+            decimal_item["description"] = item["description"]
+        if "sku" in item:
+            decimal_item["sku"] = item["sku"]
+        decimal_items.append(decimal_item)
+    
     order = {
         "order_id": order_id,
         "vendor_id": vendor_id,
         "buyer_id": buyer_id,
         "ceo_id": ceo_id,
-        "items": items,
+        "items": decimal_items,
         "total_amount": total_amount,
         "currency": currency,
         "status": "pending",  # pending → confirmed → paid → completed (or cancelled)
+        "requires_delivery": requires_delivery,
         "created_at": now,
         "updated_at": now,
     }
@@ -100,8 +125,11 @@ def create_order(
     if notes:
         order["notes"] = notes
     
+    if delivery_address:
+        order["delivery_address"] = delivery_address
+    
     table.put_item(Item=order)
-    logger.info(f"Order created: {order_id} by vendor {vendor_id} for buyer {buyer_id}")
+    logger.info(f"Order created: {order_id} by vendor {vendor_id} for buyer {buyer_id}, Delivery: {requires_delivery}")
     
     return order
 
@@ -291,3 +319,62 @@ def add_receipt_to_order(order_id: str, receipt_url: str) -> Dict[str, Any]:
         receipt_url=receipt_url,
         notes="Receipt uploaded by buyer"
     )
+
+
+def update_delivery_address(
+    order_id: str,
+    requires_delivery: bool,
+    delivery_address: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Update delivery preferences for an order.
+    
+    Args:
+        order_id (str): Order identifier
+        requires_delivery (bool): Whether delivery is required
+        delivery_address (Dict, optional): Delivery address details (street, city, state, etc.)
+    
+    Returns:
+        Dict[str, Any]: Updated order record
+    
+    Raises:
+        ValueError: If delivery is required but no address provided
+    """
+    if requires_delivery and not delivery_address:
+        raise ValueError("Delivery address is required when delivery is enabled")
+    
+    table = dynamodb.Table(ORDERS_TABLE_NAME)
+    now = int(time.time())
+    
+    update_expr = "SET #requires_delivery = :requires_delivery, #updated_at = :updated_at"
+    expr_attr_names = {
+        "#requires_delivery": "requires_delivery",
+        "#updated_at": "updated_at"
+    }
+    expr_attr_values = {
+        ":requires_delivery": requires_delivery,
+        ":updated_at": now
+    }
+    
+    if delivery_address:
+        update_expr += ", #delivery_address = :delivery_address"
+        expr_attr_names["#delivery_address"] = "delivery_address"
+        expr_attr_values[":delivery_address"] = delivery_address
+    elif not requires_delivery:
+        # Remove delivery_address if delivery is disabled
+        update_expr += " REMOVE #delivery_address"
+        expr_attr_names["#delivery_address"] = "delivery_address"
+        # Don't include :delivery_address in values when using REMOVE
+    
+    response = table.update_item(
+        Key={"order_id": order_id},
+        UpdateExpression=update_expr,
+        ExpressionAttributeNames=expr_attr_names,
+        ExpressionAttributeValues={k: v for k, v in expr_attr_values.items() if not k.startswith(":delivery_address") or delivery_address},
+        ReturnValues="ALL_NEW"
+    )
+    
+    updated_order = response["Attributes"]
+    logger.info(f"Order {order_id} delivery preferences updated: requires_delivery={requires_delivery}")
+    
+    return updated_order

@@ -22,8 +22,9 @@ from .utils import (
     format_order_for_buyer
 )
 from auth_service.database import get_buyer_by_id, get_user
-from integrations.whatsapp_api import whatsapp_api
-from integrations.instagram_api import instagram_api
+from integrations.whatsapp_api import WhatsAppAPI
+from integrations.instagram_api import InstagramAPI
+from integrations.secrets_helper import get_meta_secrets
 
 
 async def create_order(
@@ -31,17 +32,21 @@ async def create_order(
     ceo_id: str,
     buyer_id: str,
     items: List[Dict[str, Any]],
-    notes: Optional[str] = None
+    notes: Optional[str] = None,
+    requires_delivery: bool = False,
+    delivery_address: Optional[Dict[str, Any]] = None,
+    use_registered_address: bool = True
 ) -> Dict[str, Any]:
     """
     Create a new order and notify the buyer.
     
     Workflow:
     1. Validate inputs (buyer exists, items valid)
-    2. Calculate total amount
-    3. Create order in DynamoDB
-    4. Send notification to buyer via WhatsApp/Instagram
-    5. Return order details
+    2. Handle delivery address (use registered or custom)
+    3. Calculate total amount
+    4. Create order in DynamoDB
+    5. Send notification to buyer via WhatsApp/Instagram
+    6. Return order details
     
     Args:
         vendor_id (str): Vendor creating the order
@@ -49,6 +54,9 @@ async def create_order(
         buyer_id (str): Buyer for this order (wa_xxx or ig_xxx)
         items (List[Dict]): Order items with name, quantity, price
         notes (str, optional): Additional notes
+        requires_delivery (bool): Whether buyer wants delivery
+        delivery_address (Dict, optional): Custom delivery address
+        use_registered_address (bool): Use buyer's registered address
     
     Returns:
         Dict[str, Any]: Created order with notification status
@@ -59,21 +67,52 @@ async def create_order(
     """
     try:
         # Step 1: Validate buyer exists
+        logger.info(f"Creating order - Vendor: {vendor_id}, Buyer: {buyer_id}, CEO: {ceo_id}, Delivery: {requires_delivery}")
+        
         validate_buyer_id(buyer_id)
         buyer = get_buyer_by_id(buyer_id)
         
         if not buyer:
+            logger.error(f"Buyer not found: {buyer_id}")
             raise ValueError(f"Buyer not found: {buyer_id}")
+        
+        logger.info(f"Buyer found: {buyer_id}, platform: {buyer.get('platform')}")
         
         # Verify buyer belongs to this CEO (multi-tenancy)
         if buyer.get("ceo_id") != ceo_id:
+            logger.error(f"Multi-tenancy violation - Buyer CEO: {buyer.get('ceo_id')}, Order CEO: {ceo_id}")
             raise ValueError("Buyer does not belong to this business")
         
-        # Step 2: Validate items and calculate total
+        # Step 2: Handle delivery address
+        final_delivery_address = None
+        if requires_delivery:
+            if use_registered_address:
+                # Use buyer's registered address
+                logger.info("Using buyer's registered address for delivery")
+                final_delivery_address = {
+                    "street": buyer.get("street", ""),
+                    "city": buyer.get("city", ""),
+                    "state": buyer.get("state", ""),
+                    "postal_code": buyer.get("postal_code"),
+                    "country": buyer.get("country", "Nigeria"),
+                    "phone": buyer.get("phone"),
+                    "landmark": buyer.get("landmark")
+                }
+            elif delivery_address:
+                # Use custom delivery address
+                logger.info("Using custom delivery address")
+                final_delivery_address = delivery_address
+            else:
+                raise ValueError("Delivery requested but no address provided")
+        
+        # Step 3: Validate items and calculate total
+        logger.info(f"Validating {len(items)} order items")
         validate_order_items(items)
         total_amount = calculate_total(items)
+        logger.info(f"Order total calculated: {total_amount} NGN")
         
-        # Step 3: Create order in database
+        # Step 4: Create order in database with delivery info
+        logger.info("Creating order in database")
         order = db_create_order(
             vendor_id=vendor_id,
             buyer_id=buyer_id,
@@ -81,13 +120,38 @@ async def create_order(
             items=items,
             total_amount=total_amount,
             currency="NGN",
-            notes=notes
+            notes=notes,
+            requires_delivery=requires_delivery,
+            delivery_address=final_delivery_address
         )
         
-        logger.info(f"Order created: {order['order_id']} for buyer {buyer_id}")
+        logger.info(f"Order created: {order['order_id']} for buyer {buyer_id}, Delivery: {requires_delivery}")
         
-        # Step 4: Send notification to buyer
+        # Step 5: Get CEO's bank details for payment instructions
+        logger.info(f"Fetching CEO bank details for ceo_id: {ceo_id}")
+        ceo = get_user(ceo_id)
+        bank_details = ceo.get("bank_details") if ceo else None
+        
+        if bank_details:
+            logger.info(f"Bank details found for CEO {ceo_id}")
+            order["payment_details"] = {
+                "bank_name": bank_details.get("bank_name"),
+                "account_number": bank_details.get("account_number"),
+                "account_name": bank_details.get("account_name"),
+                "instructions": f"Please make payment to the account above for order {order['order_id']}. Upload receipt after payment."
+            }
+        else:
+            logger.warning(f"No bank details configured for CEO {ceo_id}")
+            order["payment_details"] = None
+        
+        # Step 6: Send notification to buyer
+        logger.info("Sending order notification to buyer")
         notification_sent = await notify_buyer_new_order(buyer, order)
+        
+        if notification_sent:
+            logger.info("Order notification sent successfully")
+        else:
+            logger.warning("Order notification failed to send")
         
         # Add notification status to response
         order["notification_sent"] = notification_sent
@@ -98,7 +162,7 @@ async def create_order(
         logger.warning(f"Order validation failed: {str(ve)}")
         raise
     except Exception as e:
-        logger.error(f"Order creation failed: {str(e)}")
+        logger.error(f"Order creation failed: {str(e)}", exc_info=True)
         raise Exception(f"Failed to create order: {str(e)}")
 
 
@@ -120,6 +184,12 @@ async def notify_buyer_new_order(buyer: Dict[str, Any], order: Dict[str, Any]) -
         # Format order details for messaging
         message = format_order_for_buyer(order)
         
+        # Fetch Meta credentials from Secrets Manager
+        meta_secrets = await get_meta_secrets()
+        if not meta_secrets:
+            logger.error("Failed to fetch Meta credentials from Secrets Manager")
+            return False
+        
         # Send via appropriate platform
         if platform == "whatsapp":
             phone = buyer.get("phone")
@@ -127,7 +197,21 @@ async def notify_buyer_new_order(buyer: Dict[str, Any], order: Dict[str, Any]) -
                 logger.warning(f"No phone number for WhatsApp buyer {buyer_id}")
                 return False
             
-            await whatsapp_api.send_message(
+            # Get WhatsApp credentials
+            whatsapp_token = meta_secrets.get("whatsapp_access_token")
+            whatsapp_phone_id = meta_secrets.get("whatsapp_phone_number_id")
+            
+            if not whatsapp_token or not whatsapp_phone_id:
+                logger.error(f"WhatsApp credentials not found in Secrets Manager. Token present: {bool(whatsapp_token)}, Phone ID present: {bool(whatsapp_phone_id)}")
+                return False
+            
+            # Initialize WhatsApp API with credentials
+            whatsapp_client = WhatsAppAPI(
+                access_token=whatsapp_token,
+                phone_number_id=whatsapp_phone_id
+            )
+            
+            await whatsapp_client.send_message(
                 to=phone,
                 message=message
             )
@@ -140,8 +224,22 @@ async def notify_buyer_new_order(buyer: Dict[str, Any], order: Dict[str, Any]) -
                 logger.warning(f"No PSID for Instagram buyer {buyer_id}")
                 return False
             
-            await instagram_api.send_message(
-                recipient_id=psid,
+            # Get Instagram credentials
+            instagram_token = meta_secrets.get("instagram_access_token")
+            instagram_page_id = meta_secrets.get("instagram_page_id")
+            
+            if not instagram_token:
+                logger.error("Instagram credentials not found in Secrets Manager")
+                return False
+            
+            # Initialize Instagram API with credentials
+            instagram_client = InstagramAPI(
+                access_token=instagram_token,
+                page_id=instagram_page_id
+            )
+            
+            await instagram_client.send_message(
+                to=psid,
                 message=message
             )
             logger.info(f"Order notification sent via Instagram to {buyer_id}")
@@ -152,7 +250,7 @@ async def notify_buyer_new_order(buyer: Dict[str, Any], order: Dict[str, Any]) -
             return False
             
     except Exception as e:
-        logger.error(f"Failed to send order notification: {str(e)}")
+        logger.error(f"Failed to send order notification: {str(e)}", exc_info=True)
         return False
 
 
@@ -393,3 +491,168 @@ async def add_receipt_to_order(
     except Exception as e:
         logger.error(f"Receipt upload error: {str(e)}")
         raise Exception(f"Failed to add receipt: {str(e)}")
+
+
+async def update_delivery_address(
+    order_id: str,
+    buyer_id: str,
+    requires_delivery: bool,
+    delivery_address: Optional[Dict[str, Any]] = None,
+    use_registered_address: bool = False
+) -> Dict[str, Any]:
+    """
+    Update delivery address for an order.
+    
+    Args:
+        order_id (str): Order identifier
+        buyer_id (str): Buyer updating delivery info
+        requires_delivery (bool): Whether delivery is required
+        delivery_address (Dict, optional): Custom delivery address
+        use_registered_address (bool): Use buyer's registered address
+    
+    Returns:
+        Dict[str, Any]: Updated order record
+    
+    Raises:
+        ValueError: If validation fails
+    """
+    try:
+        # Retrieve order
+        order = db_get_order(order_id)
+        if not order:
+            raise ValueError(f"Order not found: {order_id}")
+        
+        # Verify buyer owns this order
+        if order.get("buyer_id") != buyer_id:
+            raise ValueError("Order does not belong to this buyer")
+        
+        # Can only update delivery for pending/confirmed orders
+        if order.get("status") not in ["pending", "confirmed"]:
+            raise ValueError(f"Cannot update delivery for {order.get('status')} orders")
+        
+        # Handle delivery address
+        final_delivery_address = None
+        if requires_delivery:
+            if use_registered_address:
+                # Fetch buyer's registered address
+                buyer = get_buyer_by_id(buyer_id)
+                if not buyer:
+                    raise ValueError("Buyer not found")
+                
+                final_delivery_address = {
+                    "street": buyer.get("street", ""),
+                    "city": buyer.get("city", ""),
+                    "state": buyer.get("state", ""),
+                    "postal_code": buyer.get("postal_code"),
+                    "country": buyer.get("country", "Nigeria"),
+                    "phone": buyer.get("phone"),
+                    "landmark": buyer.get("landmark")
+                }
+                logger.info(f"Using registered address for delivery - Order: {order_id}")
+            elif delivery_address:
+                final_delivery_address = delivery_address
+                logger.info(f"Using custom address for delivery - Order: {order_id}")
+            else:
+                raise ValueError("Delivery requested but no address provided")
+        
+        # Update order in database
+        from .database import update_delivery_address as db_update_delivery
+        updated_order = db_update_delivery(
+            order_id=order_id,
+            requires_delivery=requires_delivery,
+            delivery_address=final_delivery_address
+        )
+        
+        logger.info(f"Delivery address updated for order {order_id}, Requires delivery: {requires_delivery}")
+        
+        return updated_order
+        
+    except ValueError as ve:
+        logger.warning(f"Delivery address update failed: {str(ve)}")
+        raise
+    except Exception as e:
+        logger.error(f"Delivery address update error: {str(e)}")
+        raise Exception(f"Failed to update delivery address: {str(e)}")
+
+
+async def get_order_summary(order_id: str, user_id: str, role: str) -> Dict[str, Any]:
+    """
+    Get comprehensive order summary with all details.
+    
+    Returns enriched order data suitable for:
+    - Dashboard display
+    - PDF generation
+    - Email notifications
+    - Receipt printing
+    
+    Args:
+        order_id (str): Order identifier
+        user_id (str): User requesting summary (vendor_id or buyer_id)
+        role (str): User role (Vendor or Buyer)
+    
+    Returns:
+        Dict[str, Any]: Complete order summary with calculated fields
+    
+    Raises:
+        ValueError: If order not found or unauthorized
+    """
+    try:
+        # Get order with authorization check
+        order = get_order_details(order_id, user_id, role)
+        
+        # Calculate item subtotals
+        items_with_subtotals = []
+        for item in order.get("items", []):
+            item_copy = item.copy()
+            quantity = item.get("quantity", 0)
+            price = item.get("price", 0.0)
+            item_copy["subtotal"] = round(quantity * price, 2)
+            items_with_subtotals.append(item_copy)
+        
+        # Build comprehensive summary
+        summary = {
+            "order_id": order.get("order_id"),
+            "status": order.get("status"),
+            "created_at": order.get("created_at"),
+            "updated_at": order.get("updated_at"),
+            "buyer_id": order.get("buyer_id"),
+            "vendor_id": order.get("vendor_id"),
+            "ceo_id": order.get("ceo_id"),
+            "items": items_with_subtotals,
+            "total_amount": order.get("total_amount"),
+            "currency": order.get("currency", "NGN"),
+            "payment_details": order.get("payment_details"),
+            "requires_delivery": order.get("requires_delivery", False),
+            "delivery_address": order.get("delivery_address"),
+            "notes": order.get("notes")
+        }
+        
+        # Add receipt information if available
+        if order.get("receipt_id"):
+            summary["receipt"] = {
+                "receipt_id": order.get("receipt_id"),
+                "uploaded_at": order.get("receipt_uploaded_at"),
+                "status": order.get("receipt_status", "pending_verification"),
+                "s3_key": order.get("receipt_s3_key")
+            }
+        else:
+            summary["receipt"] = None
+        
+        # Add negotiation info if exists
+        if order.get("negotiation_id"):
+            summary["negotiation"] = {
+                "negotiation_id": order.get("negotiation_id"),
+                "original_price": order.get("original_price"),
+                "final_price": order.get("total_amount"),
+                "discount": order.get("original_price", 0) - order.get("total_amount", 0) if order.get("original_price") else 0
+            }
+        
+        logger.info(f"Order summary generated for {order_id}")
+        return summary
+        
+    except ValueError as ve:
+        logger.warning(f"Order summary failed: {str(ve)}")
+        raise
+    except Exception as e:
+        logger.error(f"Order summary error: {str(e)}")
+        raise Exception(f"Failed to generate order summary: {str(e)}")

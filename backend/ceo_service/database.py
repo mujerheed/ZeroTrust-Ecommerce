@@ -11,6 +11,7 @@ This module handles all database operations for CEO service including:
 import time
 import secrets
 import uuid
+from boto3.dynamodb.conditions import Attr, Key
 from common.config import settings
 from common.db_connection import dynamodb
 from typing import Dict, Any, List, Optional
@@ -98,12 +99,7 @@ def get_ceo_by_email(email: str) -> Optional[Dict[str, Any]]:
         CEO record or None if not found
     """
     resp = USERS_TABLE.scan(
-        FilterExpression="email = :email AND #role = :role",
-        ExpressionAttributeNames={"#role": "role"},
-        ExpressionAttributeValues={
-            ":email": email.lower(),
-            ":role": "CEO"
-        }
+        FilterExpression=Attr('email').eq(email.lower()) & Attr('role').eq('CEO')
     )
     
     items = resp.get("Items", [])
@@ -124,12 +120,7 @@ def get_ceo_by_phone_id(whatsapp_phone_id: str) -> Optional[Dict[str, Any]]:
         CEO record or None if not found
     """
     resp = USERS_TABLE.scan(
-        FilterExpression="#role = :role AND whatsapp_phone_id = :phone_id",
-        ExpressionAttributeNames={"#role": "role"},
-        ExpressionAttributeValues={
-            ":role": "CEO",
-            ":phone_id": whatsapp_phone_id
-        }
+        FilterExpression=Attr('role').eq('CEO') & Attr('whatsapp_phone_id').eq(whatsapp_phone_id)
     )
     
     items = resp.get("Items", [])
@@ -150,12 +141,7 @@ def get_ceo_by_page_id(instagram_page_id: str) -> Optional[Dict[str, Any]]:
         CEO record or None if not found
     """
     resp = USERS_TABLE.scan(
-        FilterExpression="#role = :role AND instagram_page_id = :page_id",
-        ExpressionAttributeNames={"#role": "role"},
-        ExpressionAttributeValues={
-            ":role": "CEO",
-            ":page_id": instagram_page_id
-        }
+        FilterExpression=Attr('role').eq('CEO') & Attr('instagram_page_id').eq(instagram_page_id)
     )
     
     items = resp.get("Items", [])
@@ -264,12 +250,7 @@ def get_all_vendors_for_ceo(ceo_id: str) -> List[Dict[str, Any]]:
         List of vendor records belonging to this CEO
     """
     resp = USERS_TABLE.scan(
-        FilterExpression="#role = :role AND ceo_id = :ceo_id",
-        ExpressionAttributeNames={"#role": "role"},
-        ExpressionAttributeValues={
-            ":role": "Vendor",
-            ":ceo_id": ceo_id
-        }
+        FilterExpression=Attr('role').eq('Vendor') & Attr('ceo_id').eq(ceo_id)
     )
     return resp.get("Items", [])
 
@@ -282,9 +263,7 @@ def get_all_vendors() -> List[Dict[str, Any]]:
         List of all vendor records
     """
     resp = USERS_TABLE.scan(
-        FilterExpression="#role = :role",
-        ExpressionAttributeNames={"#role": "role"},
-        ExpressionAttributeValues={":role": "Vendor"}
+        FilterExpression=Attr('role').eq('Vendor')
     )
     return resp.get("Items", [])
 
@@ -301,28 +280,30 @@ def delete_vendor(vendor_id: str):
 
 # ==================== Order Queries for CEO Dashboard ====================
 
-def get_orders_for_ceo(ceo_id: str, status: str = None, limit: int = 100) -> List[Dict[str, Any]]:
+def get_orders_for_ceo(ceo_id: str, status: str = None, vendor_id: str = None, limit: int = 100) -> List[Dict[str, Any]]:
     """
     Retrieve all orders belonging to a CEO's vendors (multi-tenancy).
     
     Args:
         ceo_id: CEO identifier
         status: Optional order status filter (pending/confirmed/paid/completed/cancelled)
+        vendor_id: Optional vendor ID filter
         limit: Maximum number of orders to return
     
     Returns:
         List of order records
     """
-    filter_expr = "ceo_id = :ceo_id"
-    expr_values = {":ceo_id": ceo_id}
+    # Build filter expression using Attr() conditions
+    filter_expr = Attr('ceo_id').eq(ceo_id)
     
     if status:
-        filter_expr += " AND order_status = :status"
-        expr_values[":status"] = status
+        filter_expr = filter_expr & Attr('order_status').eq(status)
+    
+    if vendor_id:
+        filter_expr = filter_expr & Attr('vendor_id').eq(vendor_id)
     
     resp = ORDERS_TABLE.scan(
         FilterExpression=filter_expr,
-        ExpressionAttributeValues=expr_values,
         Limit=limit
     )
     
@@ -341,11 +322,7 @@ def get_flagged_orders_for_ceo(ceo_id: str) -> List[Dict[str, Any]]:
         List of flagged order records
     """
     resp = ORDERS_TABLE.scan(
-        FilterExpression="ceo_id = :ceo_id AND order_status = :status",
-        ExpressionAttributeValues={
-            ":ceo_id": ceo_id,
-            ":status": "flagged"
-        }
+        FilterExpression=Attr('ceo_id').eq(ceo_id) & Attr('order_status').eq('flagged')
     )
     return resp.get("Items", [])
 
@@ -362,11 +339,7 @@ def get_high_value_orders_for_ceo(ceo_id: str, threshold: float = 1000000) -> Li
         List of high-value order records
     """
     resp = ORDERS_TABLE.scan(
-        FilterExpression="ceo_id = :ceo_id AND total_amount >= :threshold",
-        ExpressionAttributeValues={
-            ":ceo_id": ceo_id,
-            ":threshold": threshold
-        }
+        FilterExpression=Attr('ceo_id').eq(ceo_id) & Attr('total_amount').gte(threshold)
     )
     return resp.get("Items", [])
 
@@ -474,21 +447,31 @@ def update_order_status(order_id: str, new_status: str, approved_by: str = None,
 
 # ==================== Audit Logs ====================
 
-def get_audit_logs(ceo_id: str = None, limit: int = 100) -> List[Dict[str, Any]]:
+def get_audit_logs(ceo_id: str = None, user_id: str = None, limit: int = 100) -> List[Dict[str, Any]]:
     """
     Fetch recent audit log entries.
     
     Args:
         ceo_id: Optional CEO identifier to filter logs (multi-tenancy)
+        user_id: Optional user identifier to filter logs
         limit: Maximum number of logs to return
     
     Returns:
         List of audit log entries
     """
-    if ceo_id:
+    # Build filter expression
+    filter_expr = None
+    
+    if ceo_id and user_id:
+        filter_expr = Attr('ceo_id').eq(ceo_id) & Attr('user_id').eq(user_id)
+    elif ceo_id:
+        filter_expr = Attr('ceo_id').eq(ceo_id)
+    elif user_id:
+        filter_expr = Attr('user_id').eq(user_id)
+    
+    if filter_expr:
         resp = AUDIT_LOGS_TABLE.scan(
-            FilterExpression="ceo_id = :ceo_id",
-            ExpressionAttributeValues={":ceo_id": ceo_id},
+            FilterExpression=filter_expr,
             Limit=limit
         )
     else:

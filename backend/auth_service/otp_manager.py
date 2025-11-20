@@ -17,6 +17,7 @@ import secrets
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Literal
+from boto3.dynamodb.conditions import Key
 from common.config import settings
 from common.db_connection import dynamodb
 from common.logger import logger
@@ -93,8 +94,12 @@ def _store_otp(
     table = dynamodb.Table(settings.OTPS_TABLE)
     now = int(time.time())
     
+    # Generate unique request_id for this OTP request
+    request_id = f"req_{now}_{secrets.token_hex(4)}"
+    
     item = {
         'user_id': user_id,
+        'request_id': request_id,  # Required for composite key
         'otp_hash': otp_hash,
         'role': role,
         'delivery_method': delivery_method,
@@ -113,7 +118,7 @@ def _store_otp(
 
 def _get_otp_record(user_id: str) -> Optional[Dict[str, Any]]:
     """
-    Retrieve OTP record from DynamoDB.
+    Retrieve most recent OTP record from DynamoDB.
     
     Args:
         user_id (str): User identifier
@@ -124,11 +129,18 @@ def _get_otp_record(user_id: str) -> Optional[Dict[str, Any]]:
     table = dynamodb.Table(settings.OTPS_TABLE)
     
     try:
-        response = table.get_item(Key={'user_id': user_id})
-        record = response.get('Item')
+        # Query for all OTP records for this user_id (sorted by request_id descending)
+        response = table.query(
+            KeyConditionExpression=Key('user_id').eq(user_id),
+            ScanIndexForward=False,  # Descending order (most recent first)
+            Limit=1
+        )
         
-        if not record:
+        items = response.get('Items', [])
+        if not items:
             return None
+        
+        record = items[0]
         
         # Check if expired (belt-and-suspenders with DynamoDB TTL)
         if record.get('expires_at', 0) < int(time.time()):
@@ -147,19 +159,20 @@ def _get_otp_record(user_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _delete_otp(user_id: str) -> None:
+def _delete_otp(user_id: str, request_id: str) -> None:
     """Delete OTP record after successful verification."""
     table = dynamodb.Table(settings.OTPS_TABLE)
-    table.delete_item(Key={'user_id': user_id})
-    logger.info(f"OTP deleted for user_id={user_id}")
+    table.delete_item(Key={'user_id': user_id, 'request_id': request_id})
+    logger.info(f"OTP deleted for user_id={user_id}, request_id={request_id}")
 
 
-def _increment_attempts(user_id: str, current_attempts: int) -> None:
+def _increment_attempts(user_id: str, request_id: str, current_attempts: int) -> None:
     """
     Increment OTP verification attempts and lock account if limit exceeded.
     
     Args:
         user_id (str): User identifier
+        request_id (str): Request identifier (range key)
         current_attempts (int): Current attempt count
     """
     table = dynamodb.Table(settings.OTPS_TABLE)
@@ -176,7 +189,7 @@ def _increment_attempts(user_id: str, current_attempts: int) -> None:
         logger.warning(f"User locked out after {MAX_OTP_ATTEMPTS} failed attempts: user_id={user_id}")
     
     table.update_item(
-        Key={'user_id': user_id},
+        Key={'user_id': user_id, 'request_id': request_id},
         UpdateExpression=update_expr,
         ExpressionAttributeValues=expr_values
     )
@@ -304,7 +317,7 @@ def request_otp(
         _store_otp(user_id, otp_hash, role, delivery_method, platform)
         
         # Log event to audit logs
-        from database import log_event
+        from .database import log_event
         log_event(user_id, "OTP_REQUEST", "SUCCESS", f"OTP sent via {delivery_method}")
         
         return {
@@ -315,7 +328,7 @@ def request_otp(
         
     except Exception as e:
         logger.error(f"OTP request failed for user_id={user_id}: {str(e)}")
-        from database import log_event
+        from .database import log_event
         log_event(user_id, "OTP_REQUEST", "FAILED", str(e))
         raise
 
@@ -335,14 +348,20 @@ def verify_otp(user_id: str, submitted_otp: str) -> Dict[str, Any]:
         >>> verify_otp('wa_1234567890', 'aB3$xY7!')
         {'valid': True, 'role': 'Buyer'}
     """
-    from database import log_event
+    from .database import log_event
+    
+    logger.info(f"[DEBUG] verify_otp called for user_id={user_id}")
     
     # Retrieve OTP record
+    logger.info(f"[DEBUG] Calling _get_otp_record for user_id={user_id}")
     record = _get_otp_record(user_id)
     
     if not record:
+        logger.warning(f"[DEBUG] No OTP record found for user_id={user_id}")
         log_event(user_id, "OTP_VERIFY", "FAILED", "OTP not found or expired")
         return {'valid': False, 'error': 'OTP expired or not found'}
+    
+    logger.info(f"[DEBUG] OTP record found: request_id={record.get('request_id')}, role={record.get('role')}, delivery={record.get('delivery_method')}")
     
     # Check if account is locked
     if record.get('locked_until', 0) > int(time.time()):
@@ -355,10 +374,12 @@ def verify_otp(user_id: str, submitted_otp: str) -> Dict[str, Any]:
     
     # Hash submitted OTP and compare
     submitted_hash = _hash_otp(submitted_otp)
+    logger.info(f"[DEBUG] Hash comparison - submitted_hash={submitted_hash[:16]}..., stored_hash={record['otp_hash'][:16]}...")
     
     if submitted_hash != record['otp_hash']:
+        logger.warning(f"[DEBUG] Hash mismatch! Full hashes - submitted: {submitted_hash}, stored: {record['otp_hash']}")
         # Increment attempts
-        _increment_attempts(user_id, record.get('attempts', 0))
+        _increment_attempts(user_id, record['request_id'], record.get('attempts', 0))
         log_event(user_id, "OTP_VERIFY", "FAILED", "OTP mismatch")
         
         attempts_left = MAX_OTP_ATTEMPTS - record.get('attempts', 0) - 1
@@ -367,8 +388,9 @@ def verify_otp(user_id: str, submitted_otp: str) -> Dict[str, Any]:
             'error': f'Invalid OTP. {max(0, attempts_left)} attempts remaining'
         }
     
+    logger.info(f"[DEBUG] Hash match! OTP is valid")
     # Success: delete OTP record
-    _delete_otp(user_id)
+    _delete_otp(user_id, record['request_id'])
     log_event(user_id, "OTP_VERIFY", "SUCCESS", "OTP verified")
     
     return {

@@ -3,6 +3,7 @@ DynamoDB integration for auth_service.
 """
 
 import time
+from boto3.dynamodb.conditions import Attr
 from common.config import settings
 from common.db_connection import dynamodb
 
@@ -31,6 +32,86 @@ def get_buyer_by_id(buyer_id: str) -> dict:
         Buyer record from Users table, or None if not found
     """
     return get_user(buyer_id)
+
+
+def get_user_by_phone(phone: str, role: str = None) -> dict:
+    """
+    Retrieve a user by phone number.
+    Supports multi-role users (e.g., CEO who is also a Vendor).
+    
+    Args:
+        phone: User's phone number
+        role: Optional role filter (CEO, Vendor, Buyer)
+    
+    Returns:
+        User record or None if not found
+    """
+    table = dynamodb.Table(USERS_TABLE_NAME)
+    
+    # Scan with filter (not ideal for production, but works for MVP)
+    # TODO: Add PhoneIndex GSI in CloudFormation for production
+    filter_expression = Attr('phone').eq(phone)
+    
+    response = table.scan(
+        FilterExpression=filter_expression
+    )
+    
+    items = response.get("Items", [])
+    
+    # If no role filter, return first match
+    if not role:
+        return items[0] if items else None
+    
+    # Filter by role (supports both 'role' field and 'roles' array)
+    for user in items:
+        # Check roles array (multi-role support)
+        if 'roles' in user and isinstance(user['roles'], list):
+            if role in user['roles']:
+                return user
+        # Check single role field (legacy)
+        elif user.get('role') == role:
+            return user
+    
+    return None
+
+
+def get_user_by_email(email: str, role: str = None) -> dict:
+    """
+    Retrieve a user by email address.
+    Supports multi-role users (e.g., CEO who is also a Vendor).
+    
+    Args:
+        email: User's email address
+        role: Optional role filter (CEO, Vendor, Buyer)
+    
+    Returns:
+        User record or None if not found
+    """
+    table = dynamodb.Table(USERS_TABLE_NAME)
+    
+    filter_expression = Attr('email').eq(email)
+    
+    response = table.scan(
+        FilterExpression=filter_expression
+    )
+    
+    items = response.get("Items", [])
+    
+    # If no role filter, return first match
+    if not role:
+        return items[0] if items else None
+    
+    # Filter by role (supports both 'role' field and 'roles' array)
+    for user in items:
+        # Check roles array (multi-role support)
+        if 'roles' in user and isinstance(user['roles'], list):
+            if role in user['roles']:
+                return user
+        # Check single role field (legacy)
+        elif user.get('role') == role:
+            return user
+    
+    return None
 
 def create_buyer(
     buyer_id: str, 

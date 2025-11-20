@@ -34,3 +34,5 @@ bcrypt>=4.0.0
 #PDF generation library for transaction summaries
 reportlab>=4.0.0
 
+#QR code generation for order tracking
+qrcode[pil]>=7.4.0

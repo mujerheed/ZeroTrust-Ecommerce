@@ -5,6 +5,7 @@ Provides validation, formatting, and helper functions.
 """
 
 import re
+from decimal import Decimal
 from typing import Dict, Any, List
 from fastapi import HTTPException, Header
 from common.logger import logger
@@ -60,8 +61,9 @@ def verify_vendor_token(authorization: str = Header(None)) -> Dict[str, Any]:
     try:
         payload = decode_jwt(token)
         
-        # Verify role is Vendor
-        if payload.get("role") != "Vendor":
+        # Verify role is Vendor (case-insensitive)
+        role = payload.get("role", "").upper()
+        if role != "VENDOR":
             logger.warning(f"Invalid role for order creation: {payload.get('role')}")
             raise HTTPException(status_code=403, detail="Vendor access required")
         
@@ -98,8 +100,9 @@ def verify_buyer_token(authorization: str = Header(None)) -> Dict[str, Any]:
     try:
         payload = decode_jwt(token)
         
-        # Verify role is Buyer
-        if payload.get("role") != "Buyer":
+        # Verify role is Buyer (case-insensitive)
+        role = payload.get("role", "").upper()
+        if role != "BUYER":
             logger.warning(f"Invalid role for buyer access: {payload.get('role')}")
             raise HTTPException(status_code=403, detail="Buyer access required")
         
@@ -145,7 +148,7 @@ def validate_order_items(items: List[Dict[str, Any]]) -> bool:
     return True
 
 
-def calculate_total(items: List[Dict[str, Any]]) -> float:
+def calculate_total(items: List[Dict[str, Any]]) -> Decimal:
     """
     Calculate total amount from order items.
     
@@ -153,12 +156,17 @@ def calculate_total(items: List[Dict[str, Any]]) -> float:
         items (List[Dict]): Order items with quantity and price
     
     Returns:
-        float: Total amount
+        Decimal: Total amount (DynamoDB-compatible)
     """
-    total = 0.0
+    total = Decimal("0.0")
     for item in items:
-        total += item["quantity"] * item["price"]
-    return round(total, 2)
+        # Convert to Decimal to avoid float precision issues
+        quantity = Decimal(str(item["quantity"]))
+        price = Decimal(str(item["price"]))
+        total += quantity * price
+    
+    # Round to 2 decimal places
+    return total.quantize(Decimal("0.01"))
 
 
 def validate_buyer_id(buyer_id: str) -> bool:

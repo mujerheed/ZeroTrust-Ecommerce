@@ -16,10 +16,10 @@ import time
 from fastapi import APIRouter, HTTPException, Depends, status, Query
 from fastapi.security import HTTPBearer
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import List, Dict, Any, Optional
 from .ceo_logic import (
-    register_ceo, authenticate_ceo,
+    register_ceo,
     onboard_vendor, list_vendors_for_ceo, remove_vendor_by_ceo,
     get_dashboard_metrics,
     get_pending_approvals, approve_order, reject_order, request_approval_otp,
@@ -73,6 +73,13 @@ class OrderRejectionRequest(BaseModel):
     reason: str
 
 
+class BankDetails(BaseModel):
+    """Bank account information for the CEO's business to receive payments."""
+    bank_name: str = Field(..., min_length=1, max_length=100, description="Name of the bank")
+    account_number: str = Field(..., min_length=10, max_length=10, description="10-digit account number")
+    account_name: str = Field(..., min_length=1, max_length=100, description="Account holder name")
+
+
 class CEOProfileUpdateRequest(BaseModel):
     company_name: Optional[str] = None
     phone: Optional[str] = None
@@ -80,6 +87,7 @@ class CEOProfileUpdateRequest(BaseModel):
     delivery_fee: Optional[float] = None
     email: Optional[EmailStr] = None
     otp: Optional[str] = None  # Required if updating email
+    bank_details: Optional[BankDetails] = None  # Business bank account for receiving payments
 
 
 class ChatbotSettingsUpdateRequest(BaseModel):
@@ -160,7 +168,7 @@ async def update_profile_endpoint(req: CEOProfileUpdateRequest, ceo_id: str = De
     """
     Update CEO profile information.
     
-    Regular fields (company_name, phone, business_hours, delivery_fee) can be updated directly.
+    Regular fields (company_name, phone, business_hours, delivery_fee, bank_details) can be updated directly.
     Sensitive fields (email) require OTP verification.
     
     Request:
@@ -169,6 +177,11 @@ async def update_profile_endpoint(req: CEOProfileUpdateRequest, ceo_id: str = De
             "phone": "+2348012345678",
             "business_hours": "Mon-Fri 9AM-6PM, Sat 10AM-4PM",
             "delivery_fee": 2500.00,
+            "bank_details": {
+                "bank_name": "Access Bank",
+                "account_number": "0123456789",
+                "account_name": "Alice's Electronics Ltd"
+            },
             "email": "newemail@example.com",  // Optional, requires OTP
             "otp": "123456"  // Required if updating email
         }
@@ -180,17 +193,22 @@ async def update_profile_endpoint(req: CEOProfileUpdateRequest, ceo_id: str = De
             "data": {
                 "ceo_id": "ceo_...",
                 "company_name": "Alice's Electronics Ltd.",
+                "bank_details": {...},
                 ...
             }
         }
     """
     try:
+        # Convert BankDetails to dict if provided
+        bank_details_dict = req.bank_details.dict() if req.bank_details else None
+        
         updated_ceo = update_ceo_profile(
             ceo_id=ceo_id,
             company_name=req.company_name,
             phone=req.phone,
             business_hours=req.business_hours,
             delivery_fee=req.delivery_fee,
+            bank_details=bank_details_dict,
             email=req.email,
             otp=req.otp
         )
@@ -825,6 +843,62 @@ async def preview_chatbot_endpoint(
             "error": str(e)
         })
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate preview")
+
+
+# ==================== Chatbot Settings Alias Routes (for compatibility) ====================
+
+@router.get("/chatbot/settings")
+async def get_chatbot_settings_alias(ceo_id: str = Depends(get_current_ceo)):
+    """Alias for GET /chatbot-settings (compatibility with test scripts)"""
+    try:
+        settings = get_chatbot_settings(ceo_id)
+        
+        logger.info("Chatbot settings retrieved via API (alias)", extra={"ceo_id": ceo_id})
+        
+        return format_response(
+            "success",
+            "Chatbot settings retrieved",
+            settings
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error("Get chatbot settings failed", extra={
+            "ceo_id": ceo_id,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve settings")
+
+
+@router.put("/chatbot/settings")
+async def update_chatbot_settings_alias_put(
+    req: ChatbotSettingsUpdateRequest,
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """Alias for PATCH /chatbot-settings using PUT method (compatibility with test scripts)"""
+    try:
+        updated_settings = update_chatbot_settings(
+            ceo_id=ceo_id,
+            settings=req.dict(exclude_unset=True)
+        )
+        
+        logger.info("Chatbot settings updated via API (alias)", extra={"ceo_id": ceo_id})
+        
+        return format_response(
+            "success",
+            "Chatbot settings updated successfully",
+            updated_settings
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error("Update chatbot settings failed", extra={
+            "ceo_id": ceo_id,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update settings")
 
 
 # ==================== ANALYTICS ENDPOINTS ====================

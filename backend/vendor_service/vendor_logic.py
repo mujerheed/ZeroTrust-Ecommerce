@@ -6,6 +6,7 @@ Implements Textract OCR-based auto-approval logic.
 """
 
 from typing import List, Dict, Optional
+from decimal import Decimal
 from .database import (
     get_vendor, get_vendor_assigned_orders, get_order, get_receipt,
     update_order_status, get_vendor_stats, log_vendor_action,
@@ -16,6 +17,20 @@ from common.config import settings
 from common.escalation_db import create_escalation
 from common.sns_client import send_escalation_alert, send_buyer_notification
 from common.logger import logger
+
+
+def convert_decimals(obj):
+    """
+    Recursively convert Decimal objects to float for JSON serialization.
+    DynamoDB returns Decimal objects which are not JSON serializable.
+    """
+    if isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: convert_decimals(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_decimals(item) for item in obj]
+    return obj
 
 def get_vendor_dashboard_data(vendor_id: str) -> Dict:
     """Get complete vendor dashboard data."""
@@ -36,16 +51,19 @@ def get_vendor_dashboard_data(vendor_id: str) -> Dict:
     
     log_vendor_action(vendor_id, "DASHBOARD_ACCESSED")
     
-    return {
+    # Convert all Decimal objects to float for JSON serialization
+    result = {
         "vendor_info": {
             "vendor_id": vendor["user_id"],
             "name": vendor["name"],
             "email": vendor.get("email", ""),
             "phone": vendor.get("phone", "")
         },
-        "statistics": stats,
-        "pending_orders": pending_orders[:10]  # Limit to 10 most recent
+        "statistics": convert_decimals(stats),
+        "pending_orders": convert_decimals(pending_orders[:10])  # Limit to 10 most recent
     }
+    
+    return result
 
 def get_vendor_orders(vendor_id: str, status: str = None, limit: int = 50) -> List[Dict]:
     """Get vendor's assigned orders with optional filtering."""
@@ -62,7 +80,8 @@ def get_vendor_orders(vendor_id: str, status: str = None, limit: int = 50) -> Li
     
     log_vendor_action(vendor_id, "ORDERS_VIEWED", details={"status_filter": status, "count": len(limited_orders)})
     
-    return limited_orders
+    # Convert Decimals to floats for JSON serialization
+    return convert_decimals(limited_orders)
 
 def check_escalation_required(order: Dict, manual_flag: bool = False) -> tuple[bool, str]:
     """
@@ -190,11 +209,12 @@ def get_order_details(vendor_id: str, order_id: str) -> Dict:
     
     log_vendor_action(vendor_id, "ORDER_DETAILS_VIEWED", order_id=order_id)
     
-    return {
+    # Convert Decimals to floats
+    return convert_decimals({
         "order": order,
         "buyer": buyer_info,
         "receipt": receipt
-    }
+    })
 
 def verify_receipt(vendor_id: str, order_id: str, verification_status: str, notes: str = None) -> Dict:
     """
@@ -305,18 +325,29 @@ def get_receipt_details(vendor_id: str, order_id: str) -> Dict:
     
     log_vendor_action(vendor_id, "RECEIPT_VIEWED", order_id=order_id)
     
-    return {
+    # Convert Decimals to floats
+    amount = float(order.get("amount", 0)) if order.get("amount") else 0
+    
+    return convert_decimals({
         "receipt": receipt,
-        "order_amount": order.get("amount"),
+        "order_amount": amount,
         "buyer_name": order.get("buyer_name"),
         "verification_guidelines": {
             "check_payer_name": "Verify payer name matches buyer",
-            "check_amount": f"Verify amount is ₦{order.get('amount', 0):,.2f}",
+            "check_amount": f"Verify amount is ₦{amount:,.2f}",
             "check_timestamp": "Verify payment is recent",
             "check_bank": "Verify bank details are clear"
         }
-    }
+    })
 
+def search_vendor_orders(vendor_id: str, search_term: str, search_field: str = "buyer_name") -> List[Dict]:
+    """Search through vendor's assigned orders."""
+    vendor = get_vendor(vendor_id)
+    if not vendor:
+        raise ValueError("Vendor not found")
+    
+    all_orders = get_vendor_assigned_orders(vendor_id)
+    
 def search_vendor_orders(vendor_id: str, search_term: str, search_field: str = "buyer_name") -> List[Dict]:
     """Search through vendor's assigned orders."""
     vendor = get_vendor(vendor_id)
@@ -350,7 +381,8 @@ def search_vendor_orders(vendor_id: str, search_term: str, search_field: str = "
         "results_count": len(filtered_orders)
     })
     
-    return filtered_orders
+    # Convert Decimals to floats
+    return convert_decimals(filtered_orders)
 
 
 def process_receipt_after_ocr(order_id: str) -> Dict:

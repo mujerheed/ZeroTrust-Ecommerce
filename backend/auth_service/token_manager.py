@@ -32,7 +32,7 @@ def create_jwt(user_id: str, role: str, ceo_id: Optional[str] = None) -> str:
     
     Args:
         user_id: Unique identifier for the user (buyer_id, vendor_id, or ceo_id)
-        role: User role ("BUYER", "VENDOR", or "CEO")
+        role: User role ("BUYER", "VENDOR", or "CEO") - case insensitive
         ceo_id: CEO identifier for multi-tenancy (optional for CEO role)
     
     Returns:
@@ -41,6 +41,9 @@ def create_jwt(user_id: str, role: str, ceo_id: Optional[str] = None) -> str:
     Raises:
         ValueError: If role is invalid or required parameters are missing
     """
+    # Normalize role to uppercase for consistency
+    role = role.upper()
+    
     if role not in TOKEN_EXPIRY_MINUTES:
         raise ValueError(f"Invalid role: {role}. Must be one of {list(TOKEN_EXPIRY_MINUTES.keys())}")
     

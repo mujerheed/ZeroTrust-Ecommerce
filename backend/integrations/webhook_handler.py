@@ -119,8 +119,12 @@ async def handle_webhook_challenge(request: Request) -> Dict[str, Any]:
         
         if token == expected_token:
             logger.info("Webhook verification successful", extra={'challenge': challenge})
-            # Return challenge to complete verification
-            return {'challenge': int(challenge)}
+            # Return challenge to complete verification (keep as string, convert to int if numeric)
+            try:
+                challenge_value = int(challenge) if challenge.isdigit() else challenge
+            except (ValueError, AttributeError):
+                challenge_value = challenge
+            return {'challenge': challenge_value}
         else:
             logger.error("Webhook verification failed: token mismatch")
             raise HTTPException(status_code=403, detail="Invalid verify token")

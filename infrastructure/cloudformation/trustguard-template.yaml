@@ -38,6 +38,10 @@ Globals:
         STACK_NAME: !Ref AWS::StackName
         META_SECRET_NAME: !Sub "/TrustGuard/${Environment}/meta-${AWS::StackName}"
         META_WEBHOOK_VERIFY_TOKEN: "trustguard_verify_2025"
+  Api:
+    # Disable AWS_IAM authorization - we handle JWT authentication in Lambda
+    Auth:
+      DefaultAuthorizer: NONE
 
 # ============================================================
 # RESOURCES: Infrastructure components
@@ -368,6 +372,51 @@ Resources:
         - Key: DataSensitivity
           Value: Low
 
+  # Negotiations Table: Price negotiation workflow before order creation
+  TrustGuardNegotiationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "TrustGuard-Negotiations-${Environment}"
+      AttributeDefinitions:
+        - AttributeName: negotiation_id
+          AttributeType: S
+        - AttributeName: buyer_id
+          AttributeType: S
+        - AttributeName: vendor_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: negotiation_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ByBuyer
+          KeySchema:
+            - AttributeName: buyer_id
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: ByVendor
+          KeySchema:
+            - AttributeName: vendor_id
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TrustGuardKMSKey
+      Tags:
+        - Key: Purpose
+          Value: Price-Negotiation-Workflow
+        - Key: DataSensitivity
+          Value: Medium
+
   # ========== S3 BUCKET (Receipts) ==========
   TrustGuardReceiptBucket:
     Type: AWS::S3::Bucket
@@ -453,6 +502,7 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:GetItem
                   - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
                   - dynamodb:Query
                   - dynamodb:Scan
                 Resource:
@@ -465,11 +515,13 @@ Resources:
                   - !GetAtt TrustGuardConversationStateTable.Arn
                   - !GetAtt TrustGuardCEOConfigTable.Arn
                   - !GetAtt TrustGuardVendorPreferencesTable.Arn
+                  - !GetAtt TrustGuardNegotiationsTable.Arn
                   - !Sub "${TrustGuardUsersTable.Arn}/index/*"
                   - !Sub "${TrustGuardOrdersTable.Arn}/index/*"
                   - !Sub "${TrustGuardEscalationsTable.Arn}/index/*"
                   - !Sub "${TrustGuardCEOMappingTable.Arn}/index/*"
                   - !Sub "${TrustGuardAuditLogsTable.Arn}/index/*"
+                  - !Sub "${TrustGuardNegotiationsTable.Arn}/index/*"
         
         - PolicyName: S3Access
           PolicyDocument:
@@ -536,11 +588,15 @@ Resources:
           Properties:
             Path: /auth/{proxy+}
             Method: ANY
+            Auth:
+              Authorizer: NONE
         ApiWebhooks:
           Type: Api
           Properties:
             Path: /integrations/{proxy+}
             Method: ANY
+            Auth:
+              Authorizer: NONE
 
   # VendorService: Vendor dashboard and order management
   VendorService:
@@ -552,10 +608,12 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Environment:
         Variables:
+          JWT_SECRET_ARN: !Ref TrustGuardSecrets
           ORDERS_TABLE: !Ref TrustGuardOrdersTable
           USERS_TABLE: !Ref TrustGuardUsersTable
           ESCALATIONS_TABLE: !Ref TrustGuardEscalationsTable
           AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
+          VENDOR_PREFERENCES_TABLE: !Ref TrustGuardVendorPreferencesTable
           ESCALATION_SNS_TOPIC_ARN: !Ref EscalationAlertTopic
       Events:
         ApiVendor:
@@ -563,6 +621,8 @@ Resources:
           Properties:
             Path: /vendor/{proxy+}
             Method: ANY
+            Auth:
+              Authorizer: NONE
 
   # CEOService: CEO dashboard, approvals, audit logs
   CEOService:
@@ -579,12 +639,60 @@ Resources:
           USERS_TABLE: !Ref TrustGuardUsersTable
           AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
           OTPS_TABLE: !Ref TrustGuardOTPsTable
+          CEO_CONFIG_TABLE: !Ref TrustGuardCEOConfigTable
       Events:
         ApiCEO:
           Type: Api
           Properties:
             Path: /ceo/{proxy+}
             Method: ANY
+            Auth:
+              Authorizer: NONE
+
+  # OrderService: Order creation and lifecycle management
+  OrderService:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "TrustGuard-OrderService-${Environment}"
+      CodeUri: ../../backend/
+      Handler: app.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          ORDERS_TABLE: !Ref TrustGuardOrdersTable
+          USERS_TABLE: !Ref TrustGuardUsersTable
+          JWT_SECRET_ARN: !Ref TrustGuardSecrets
+          AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
+          NEGOTIATIONS_TABLE: !Ref TrustGuardNegotiationsTable
+      Events:
+        ApiOrders:
+          Type: Api
+          Properties:
+            Path: /orders/{proxy+}
+            Method: ANY
+            Auth:
+              Authorizer: NONE
+        ApiOrdersRoot:
+          Type: Api
+          Properties:
+            Path: /orders
+            Method: ANY
+            Auth:
+              Authorizer: NONE
+        ApiNegotiations:
+          Type: Api
+          Properties:
+            Path: /negotiations/{proxy+}
+            Method: ANY
+            Auth:
+              Authorizer: NONE
+        ApiNegotiationsRoot:
+          Type: Api
+          Properties:
+            Path: /negotiations
+            Method: ANY
+            Auth:
+              Authorizer: NONE
 
   # ReceiptService: Receipt upload and presigned URL generation
   ReceiptService:
@@ -601,11 +709,20 @@ Resources:
           ORDERS_TABLE: !Ref TrustGuardOrdersTable
           AUDIT_LOGS_TABLE: !Ref TrustGuardAuditLogsTable
       Events:
-        ApiReceipt:
+        ApiReceipts:
           Type: Api
           Properties:
-            Path: /receipt/{proxy+}
+            Path: /receipts/{proxy+}
             Method: ANY
+            Auth:
+              Authorizer: NONE
+        ApiReceiptsRoot:
+          Type: Api
+          Properties:
+            Path: /receipts
+            Method: ANY
+            Auth:
+              Authorizer: NONE
 
 # ============================================================
 # OUTPUTS: Key infrastructure details

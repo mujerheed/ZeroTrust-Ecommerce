@@ -10,10 +10,37 @@ Date: October 2025
 
 import re
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import hashlib
 import secrets
+
+
+def user_has_role(user: Dict[str, Any], role: str) -> bool:
+    """
+    Check if a user has a specific role.
+    Supports both single 'role' field and 'roles' array for multi-role users.
+    
+    Args:
+        user: User record from DynamoDB
+        role: Role to check (CEO, Vendor, Buyer)
+    
+    Returns:
+        bool: True if user has the role
+    
+    Example:
+        # CEO who is also a Vendor
+        user = {"role": "CEO", "roles": ["CEO", "Vendor"]}
+        user_has_role(user, "CEO")     # True
+        user_has_role(user, "Vendor")  # True
+        user_has_role(user, "Buyer")   # False
+    """
+    # Check roles array first (newer schema)
+    if 'roles' in user and isinstance(user['roles'], list):
+        return role in user['roles']
+    
+    # Fallback to single role field (legacy schema)
+    return user.get('role') == role
 
 
 def format_response(status: str, message: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

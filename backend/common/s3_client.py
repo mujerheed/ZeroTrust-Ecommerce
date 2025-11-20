@@ -32,7 +32,8 @@ class ReceiptStorageService:
         'image/jpg', 
         'image/png',
         'image/webp',
-        'application/pdf'
+        'image/heic',  # iOS photos
+        'application/pdf'  # Bank receipts in PDF format
     ]
     
     MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB

@@ -174,7 +174,7 @@ def get_vendor_performance_summary(ceo_id: str) -> List[Dict]:
             ...
         ]
     """
-    from .database import get_all_vendors_for_ceo, get_orders_for_ceo, get_audit_logs
+    from ceo_service.database import get_all_vendors_for_ceo, get_orders_for_ceo, get_audit_logs
     
     vendors = get_all_vendors_for_ceo(ceo_id)
     performance_data = []
