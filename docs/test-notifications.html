@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustGuard - Notification System Tester</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+            padding: 40px;
+        }
+        
+        h1 {
+            color: #1e293b;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        
+        .subtitle {
+            color: #64748b;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .input-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            color: #475569;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        
+        input, select {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .btn {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .result {
+            margin-top: 20px;
+            padding: 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            display: none;
+        }
+        
+        .result.success {
+            background: #dcfce7;
+            border: 1px solid #86efac;
+            color: #166534;
+        }
+        
+        .result.error {
+            background: #fee2e2;
+            border: 1px solid #fca5a5;
+            color: #991b1b;
+        }
+        
+        .instructions {
+            background: #f8fafc;
+            border-left: 4px solid #667eea;
+            padding: 16px;
+            margin-top: 20px;
+            border-radius: 4px;
+        }
+        
+        .instructions h3 {
+            color: #1e293b;
+            font-size: 16px;
+            margin-bottom: 10px;
+        }
+        
+        .instructions ol {
+            margin-left: 20px;
+            color: #475569;
+            font-size: 14px;
+        }
+        
+        .instructions li {
+            margin-bottom: 8px;
+        }
+        
+        .help-text {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 6px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔔 Notification System Tester</h1>
+        <p class="subtitle">Test TrustGuard's real-time notification and auto-pop modal</p>
+        
+        <div class="input-group">
+            <label for="token">JWT Token</label>
+            <input 
+                type="text" 
+                id="token" 
+                placeholder="Paste your JWT token from localStorage"
+            >
+            <p class="help-text">
+                Login to CEO portal, open DevTools → Application → Local Storage → copy 'token' value
+            </p>
+        </div>
+        
+        <div class="input-group">
+            <label for="notificationType">Notification Type</label>
+            <select id="notificationType">
+                <option value="escalation">Escalation (Auto-pops modal)</option>
+                <option value="alert">Alert (Bell only)</option>
+                <option value="info">Info (Bell only)</option>
+            </select>
+        </div>
+        
+        <button class="btn" onclick="createTestNotification()">
+            🚀 Create Test Notification
+        </button>
+        
+        <div id="result" class="result"></div>
+        
+        <div class="instructions">
+            <h3>📋 What to expect:</h3>
+            <ol>
+                <li><strong>Within 30 seconds:</strong> Check the TopBar notification bell</li>
+                <li><strong>If "Escalation":</strong> Modal should auto-pop with order details</li>
+                <li><strong>Red badge:</strong> Should appear on bell icon with unread count</li>
+                <li><strong>Toast notification:</strong> Should appear in bottom-right corner</li>
+                <li><strong>Click "Review Now":</strong> Should navigate to Approvals page</li>
+            </ol>
+        </div>
+    </div>
+    
+    <script>
+        async function createTestNotification() {
+            const token = document.getElementById('token').value.trim();
+            const notificationType = document.getElementById('notificationType').value;
+            const resultDiv = document.getElementById('result');
+            const btn = document.querySelector('.btn');
+            
+            // Validation
+            if (!token) {
+                showResult('error', '❌ Please enter your JWT token');
+                return;
+            }
+            
+            // Disable button
+            btn.disabled = true;
+            btn.textContent = '⏳ Creating notification...';
+            resultDiv.style.display = 'none';
+            
+            try {
+                const response = await fetch(
+                    `http://localhost:8000/ceo/test/create-notification?notification_type=${notificationType}`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json'
+                        }
+                    }
+                );
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult('success', `
+                        ✅ Success! Test notification created!<br><br>
+                        <strong>Notification ID:</strong> ${data.data.notification.id}<br>
+                        <strong>Type:</strong> ${data.data.notification.type}<br>
+                        <strong>Amount:</strong> ₦${data.data.notification.amount.toLocaleString()}<br>
+                        <strong>Reason:</strong> ${data.data.notification.reason}<br><br>
+                        <strong>⏰ Wait up to 30 seconds for the modal to appear in the CEO portal!</strong>
+                    `);
+                } else {
+                    showResult('error', `
+                        ❌ Error: ${data.detail || 'Failed to create notification'}<br><br>
+                        <strong>Status:</strong> ${response.status}<br>
+                        <strong>Tip:</strong> Make sure your token is valid and not expired.
+                    `);
+                }
+            } catch (error) {
+                showResult('error', `
+                    ❌ Network Error: ${error.message}<br><br>
+                    <strong>Possible causes:</strong><br>
+                    • Backend server not running (check port 8000)<br>
+                    • CORS issues<br>
+                    • Invalid URL
+                `);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🚀 Create Test Notification';
+            }
+        }
+        
+        function showResult(type, message) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.className = `result ${type}`;
+            resultDiv.innerHTML = message;
+            resultDiv.style.display = 'block';
+        }
+        
+        // Auto-fill token from localStorage if available
+        window.addEventListener('load', () => {
+            const storedToken = localStorage.getItem('token');
+            if (storedToken) {
+                document.getElementById('token').value = storedToken;
+            }
+        });
+    </script>
+</body>
+</html>

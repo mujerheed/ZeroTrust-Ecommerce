@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Literal
 from boto3.dynamodb.conditions import Key
 from common.config import settings
-from common.db_connection import dynamodb
+from common.db_connection import dynamodb, sns_client, ses_client
 from common.logger import logger
 
 # OTP Configuration
@@ -195,6 +195,85 @@ def _increment_attempts(user_id: str, request_id: str, current_attempts: int) ->
     )
 
 
+def _send_sms(phone_number: str, message: str) -> None:
+    """
+    Send SMS via AWS SNS.
+    """
+    # DEV MODE: Log OTP to console for local testing
+    if settings.ENVIRONMENT == "dev":
+        logger.warning(f"🔐 [DEV-SMS] To: {phone_number[-4:]}**** | Message: {message}")
+        print(f"\n[DEV-SMS] To: {phone_number} | Message: {message}\n")
+
+    try:
+        # Ensure phone number has + prefix
+        if not phone_number.startswith('+'):
+            # Assuming Nigerian numbers if not specified, but better to rely on validation
+            if phone_number.startswith('0'):
+                phone_number = '+234' + phone_number[1:]
+            else:
+                phone_number = '+' + phone_number
+                
+        sns_client.publish(
+            PhoneNumber=phone_number,
+            Message=message,
+            MessageAttributes={
+                'AWS.SNS.SMS.SenderID': {
+                    'DataType': 'String',
+                    'StringValue': settings.SMS_SENDER_ID
+                },
+                'AWS.SNS.SMS.SMSType': {
+                    'DataType': 'String',
+                    'StringValue': 'Transactional'
+                }
+            }
+        )
+        logger.info(f"SMS sent to {phone_number}")
+    except Exception as e:
+        logger.error(f"Failed to send SMS to {phone_number}: {str(e)}")
+        # Don't raise here to allow fallback or graceful degradation if needed, 
+        # but for OTP critical path, maybe we should? 
+        # The caller expects success or handles exception.
+        raise
+
+
+def _send_email(to_email: str, subject: str, body: str) -> None:
+    """
+    Send Email via AWS SES.
+    """
+    # DEV MODE: Log OTP to console for local testing
+    if settings.ENVIRONMENT == "dev":
+        logger.warning(f"📧 [DEV-EMAIL] To: {to_email} | Subject: {subject} | Body: {body[:100]}...")
+        print(f"\n[DEV-EMAIL] To: {to_email} | Subject: {subject} | Body: {body}\n")
+
+    try:
+        ses_client.send_email(
+            Source=settings.SMS_SENDER_ID + " <no-reply@trustguard.com>", # Ideally configured in settings
+            Destination={
+                'ToAddresses': [to_email]
+            },
+            Message={
+                'Subject': {
+                    'Data': subject,
+                    'Charset': 'UTF-8'
+                },
+                'Body': {
+                    'Text': {
+                        'Data': body,
+                        'Charset': 'UTF-8'
+                    }
+                }
+            }
+        )
+        logger.info(f"Email sent to {to_email}")
+    except Exception as e:
+        logger.error(f"Failed to send Email to {to_email}: {str(e)}")
+        # Don't raise here to allow fallback or graceful degradation if needed
+        # But for CEO OTP, we want to know if it fails? 
+        # Since it's dual delivery (SMS + Email), we can log error and continue if SMS worked.
+        # But for now, let's log and allow the flow to continue (since SMS likely sent).
+        pass
+
+
 def _deliver_otp_buyer(
     user_id: str,
     otp: str,
@@ -219,20 +298,27 @@ def _deliver_otp_buyer(
     try:
         if platform == 'whatsapp':
             # TODO: Call WhatsApp Business API
-            logger.info(f"[MOCK] Sending OTP via WhatsApp to {user_id}: {otp}")
+            logger.warning(f"💬 [DEV-WHATSAPP] To: {user_id} | OTP: {otp}")
+            if settings.ENVIRONMENT == "dev":
+                print(f"\n[DEV-WHATSAPP] To: {user_id} | OTP: {otp}\n")
             return 'whatsapp'
         elif platform == 'instagram':
             # TODO: Call Instagram Messaging API
-            logger.info(f"[MOCK] Sending OTP via Instagram to {user_id}: {otp}")
+            logger.warning(f"📷 [DEV-INSTAGRAM] To: {user_id} | OTP: {otp}")
+            if settings.ENVIRONMENT == "dev":
+                print(f"\n[DEV-INSTAGRAM] To: {user_id} | OTP: {otp}\n")
             return 'instagram'
     except Exception as e:
         logger.warning(f"Platform delivery failed for {user_id}: {str(e)}, falling back to SMS")
     
     # Fallback to SMS if platform delivery fails or phone is available
     if phone:
-        # TODO: Implement AWS SNS SMS delivery
-        logger.info(f"[MOCK] Sending OTP via SMS to {phone}: {otp}")
-        return 'sms'
+        try:
+            message = f"Your TrustGuard verification code is: {otp}. Do not share this code with anyone."
+            _send_sms(phone, message)
+            return 'sms'
+        except Exception as e:
+            logger.error(f"SMS fallback failed for {user_id}: {str(e)}")
     
     raise Exception(f"Failed to deliver OTP to {user_id}: no valid delivery channel")
 
@@ -248,8 +334,8 @@ def _deliver_otp_vendor(phone: str, otp: str) -> str:
     Returns:
         str: Delivery method ('sms')
     """
-    # TODO: Implement AWS SNS SMS delivery
-    logger.info(f"[MOCK] Sending Vendor OTP via SMS to {phone}: {otp}")
+    message = f"Your TrustGuard Vendor login code is: {otp}. Valid for 5 minutes."
+    _send_sms(phone, message)
     return 'sms'
 
 
@@ -265,9 +351,26 @@ def _deliver_otp_ceo(phone: str, email: str, otp: str) -> str:
     Returns:
         str: Delivery method ('sms_email')
     """
-    # TODO: Implement AWS SNS for SMS and SES for Email
-    logger.info(f"[MOCK] Sending CEO OTP via SMS to {phone}: {otp}")
-    logger.info(f"[MOCK] Sending CEO OTP via Email to {email}: {otp}")
+    # Send SMS via SNS
+    sms_message = f"TrustGuard CEO Access: Your verification code is {otp}. Valid for 5 minutes."
+    _send_sms(phone, sms_message)
+    
+    # Send Email via SES (if email provided)
+    if email and "@" in email:
+        email_subject = "TrustGuard CEO Verification Code"
+        email_body = f"""
+        Hello,
+        
+        Your TrustGuard CEO verification code is: {otp}
+        
+        This code is valid for 5 minutes.
+        If you did not request this code, please contact security immediately.
+        
+        Regards,
+        TrustGuard Security Team
+        """
+        _send_email(email, email_subject, email_body)
+    
     return 'sms_email'
 
 
@@ -307,9 +410,15 @@ def request_otp(
         elif role.upper() == 'VENDOR':
             delivery_method = _deliver_otp_vendor(contact, otp)
         elif role.upper() == 'CEO':
-            # Assume contact is phone, need email separately
-            # For CEO, contact should be phone and we need email from user record
-            delivery_method = _deliver_otp_ceo(contact, contact, otp)  # TODO: get actual email
+            # Determine SMS and Email targets
+            # If phone is explicitly provided (e.g. from register_ceo), use it for SMS
+            # Otherwise use contact (which might be phone)
+            sms_target = phone if phone else contact
+            
+            # If contact is email, use it for email
+            email_target = contact if "@" in contact else ""
+            
+            delivery_method = _deliver_otp_ceo(sms_target, email_target, otp)
         else:
             raise ValueError(f"Invalid role: {role}")
         
@@ -323,7 +432,9 @@ def request_otp(
         return {
             'success': True,
             'delivery_method': delivery_method,
-            'expires_in_seconds': OTP_TTL_SECONDS
+            'expires_in_seconds': OTP_TTL_SECONDS,
+            # In development, return OTP for testing (remove in production)
+            'dev_otp': otp if logger.level <= 10 else None
         }
         
     except Exception as e:

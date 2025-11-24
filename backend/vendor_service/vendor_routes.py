@@ -275,3 +275,479 @@ async def get_unread_notifications(vendor_id: str = Depends(get_current_vendor))
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve notifications: {str(e)}")
+
+
+@router.get("/notifications/recent")
+async def get_recent_notification_events(
+    since: int = 0,  # Unix timestamp
+    vendor_id: str = Depends(get_current_vendor)
+):
+    """
+    Get recent notification events since a timestamp for real-time toast alerts.
+    
+    Frontend polls this every 15 seconds with last check timestamp.
+    
+    Query Parameters:
+        since: Unix timestamp (seconds) of last check
+    
+    Returns:
+        {
+            "events": [
+                {
+                    "type": "new_order" | "receipt_uploaded" | "order_flagged" | "high_value_alert",
+                    "order_id": "ord_123",
+                    "buyer_id": "wa_234...",
+                    "amount": 12500,
+                    "timestamp": 1732012345
+                },
+                ...
+            ]
+        }
+    """
+    try:
+        from .database import get_vendor_assigned_orders
+        import time
+        
+        # Get orders updated since 'since' timestamp
+        all_orders = get_vendor_assigned_orders(vendor_id, status=None)
+        recent_orders = [
+            order for order in all_orders
+            if order.get("updated_at", 0) > since
+        ]
+        
+        # Generate events based on order status changes
+        events = []
+        for order in recent_orders:
+            order_status = order.get("order_status", "")
+            amount = order.get("total_amount", 0)
+            
+            # Determine event type based on status and amount
+            if order_status == "PENDING" and order.get("created_at", 0) > since:
+                events.append({
+                    "type": "new_order",
+                    "order_id": order.get("order_id"),
+                    "buyer_id": order.get("buyer_id"),
+                    "amount": amount,
+                    "timestamp": order.get("created_at")
+                })
+            elif order_status == "RECEIPT_UPLOADED":
+                events.append({
+                    "type": "receipt_uploaded",
+                    "order_id": order.get("order_id"),
+                    "buyer_id": order.get("buyer_id"),
+                    "amount": amount,
+                    "timestamp": order.get("updated_at")
+                })
+            elif order_status == "FLAGGED":
+                events.append({
+                    "type": "order_flagged",
+                    "order_id": order.get("order_id"),
+                    "buyer_id": order.get("buyer_id"),
+                    "amount": amount,
+                    "timestamp": order.get("updated_at")
+                })
+            elif amount >= 100000000:  # ₦1M threshold (in kobo)
+                events.append({
+                    "type": "high_value_alert",
+                    "order_id": order.get("order_id"),
+                    "buyer_id": order.get("buyer_id"),
+                    "amount": amount,
+                    "timestamp": order.get("updated_at")
+                })
+        
+        # Sort by timestamp descending (most recent first)
+        events.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        
+        return format_response("success", f"{len(events)} recent events", {
+            "events": events[:20],  # Limit to 20 most recent
+            "check_timestamp": int(time.time())
+        })
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve recent notifications: {str(e)}")
+
+
+# ========== BUYERS MANAGEMENT ==========
+
+@router.get("/buyers")
+async def get_buyers(
+    flag_status: Optional[str] = None,  # 'flagged', 'clean', None for all
+    limit: int = 50,
+    vendor_id: str = Depends(get_current_vendor)
+):
+    """
+    Get all buyers this vendor has interacted with.
+    
+    Query params:
+        - flag_status: Filter by flag status ('flagged', 'clean', or None for all)
+        - limit: Max results to return (default 50)
+    
+    Returns:
+        {
+            "buyers": [
+                {
+                    "buyer_id": "wa_234...",
+                    "name": "John Doe",
+                    "phone": "+234***5678",
+                    "total_orders": 3,
+                    "last_interaction": 1732012345,
+                    "flag_status": "clean",
+                    "flagged_count": 0
+                }
+            ],
+            "total_count": number,
+            "filter_applied": "flagged" or None
+        }
+    """
+    try:
+        from .database import get_vendor_assigned_orders
+        from collections import defaultdict
+        import time
+        
+        # Get all orders for this vendor
+        all_orders = get_vendor_assigned_orders(vendor_id, status=None)
+        
+        # Group by buyer_id
+        buyer_stats = defaultdict(lambda: {
+            "total_orders": 0,
+            "last_interaction": 0,
+            "flagged_count": 0,
+            "buyer_id": None,
+            "phone": None
+        })
+        
+        for order in all_orders:
+            buyer_id = order.get("buyer_id")
+            if not buyer_id:
+                continue
+            
+            buyer_stats[buyer_id]["buyer_id"] = buyer_id
+            buyer_stats[buyer_id]["phone"] = order.get("buyer_phone", "Unknown")
+            buyer_stats[buyer_id]["total_orders"] += 1
+            buyer_stats[buyer_id]["last_interaction"] = max(
+                buyer_stats[buyer_id]["last_interaction"],
+                order.get("updated_at", 0)
+            )
+            
+            if order.get("order_status") == "FLAGGED":
+                buyer_stats[buyer_id]["flagged_count"] += 1
+        
+        # Convert to list and add computed fields
+        buyers_list = []
+        for buyer_id, stats in buyer_stats.items():
+            # Determine flag status
+            flag_stat = "flagged" if stats["flagged_count"] > 0 else "clean"
+            
+            # Apply filter if specified
+            if flag_status and flag_stat != flag_status:
+                continue
+            
+            # Mask phone (show last 4 digits only)
+            phone = stats["phone"]
+            if phone and len(phone) > 4:
+                masked_phone = f"+234***{phone[-4:]}"
+            else:
+                masked_phone = phone
+            
+            buyers_list.append({
+                "buyer_id": buyer_id,
+                "name": f"Buyer {buyer_id[-6:]}",  # Generate display name from ID
+                "phone": masked_phone,
+                "total_orders": stats["total_orders"],
+                "last_interaction": stats["last_interaction"],
+                "last_interaction_ago": _time_ago(stats["last_interaction"]),
+                "flag_status": flag_stat,
+                "flagged_count": stats["flagged_count"]
+            })
+        
+        # Sort by last interaction (most recent first)
+        buyers_list.sort(key=lambda x: x["last_interaction"], reverse=True)
+        
+        # Apply limit
+        buyers_list = buyers_list[:limit]
+        
+        return format_response("success", f"Retrieved {len(buyers_list)} buyers", {
+            "buyers": buyers_list,
+            "total_count": len(buyers_list),
+            "filter_applied": flag_status
+        })
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve buyers: {str(e)}")
+
+
+@router.get("/buyers/{buyer_id}")
+async def get_buyer_details(
+    buyer_id: str,
+    vendor_id: str = Depends(get_current_vendor)
+):
+    """
+    Get detailed information about a specific buyer.
+    
+    Returns:
+        {
+            "buyer_id": "wa_234...",
+            "phone": "+234***5678",
+            "total_orders": 5,
+            "completed_orders": 3,
+            "flagged_orders": 1,
+            "pending_orders": 1,
+            "first_order_date": 1730012345,
+            "last_order_date": 1732012345,
+            "orders": [...]  // Recent orders
+        }
+    """
+    try:
+        from .database import get_vendor_assigned_orders
+        
+        # Get all orders for this buyer from this vendor
+        all_orders = get_vendor_assigned_orders(vendor_id, status=None)
+        buyer_orders = [o for o in all_orders if o.get("buyer_id") == buyer_id]
+        
+        if not buyer_orders:
+            raise HTTPException(status_code=404, detail=f"Buyer {buyer_id} not found or no orders with this vendor")
+        
+        # Calculate stats
+        total = len(buyer_orders)
+        completed = sum(1 for o in buyer_orders if o.get("order_status") in ["APPROVED", "CEO_APPROVED", "COMPLETED"])
+        flagged = sum(1 for o in buyer_orders if o.get("order_status") == "FLAGGED")
+        pending = sum(1 for o in buyer_orders if o.get("order_status") in ["PENDING", "RECEIPT_UPLOADED"])
+        
+        timestamps = [o.get("created_at", 0) for o in buyer_orders if o.get("created_at")]
+        first_order = min(timestamps) if timestamps else 0
+        last_order = max(timestamps) if timestamps else 0
+        
+        # Get phone from first order
+        phone = buyer_orders[0].get("buyer_phone", "Unknown")
+        if phone and len(phone) > 4:
+            masked_phone = f"+234***{phone[-4:]}"
+        else:
+            masked_phone = phone
+        
+        # Sort orders by date (most recent first) and limit to 10
+        buyer_orders.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+        recent_orders = buyer_orders[:10]
+        
+        return format_response("success", "Buyer details retrieved", {
+            "buyer_id": buyer_id,
+            "phone": masked_phone,
+            "total_orders": total,
+            "completed_orders": completed,
+            "flagged_orders": flagged,
+            "pending_orders": pending,
+            "first_order_date": first_order,
+            "last_order_date": last_order,
+            "orders": recent_orders
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve buyer details: {str(e)}")
+
+
+# ========== NEGOTIATION / CHAT INTERFACE ==========
+
+class ChatMessageRequest(BaseModel):
+    message: str
+    quick_action: Optional[str] = None  # 'confirm_price', 'send_payment_details', 'request_receipt'
+
+
+@router.post("/orders/{order_id}/messages")
+async def send_chat_message(
+    order_id: str,
+    req: ChatMessageRequest,
+    vendor_id: str = Depends(get_current_vendor)
+):
+    """
+    Send a chat message to buyer for an order (negotiation interface).
+    
+    Body:
+        - message: Text message to send
+        - quick_action: Optional quick action ('confirm_price', 'send_payment_details', 'request_receipt')
+    
+    Returns:
+        {
+            "message_id": "msg_123",
+            "sent_at": 1732012345,
+            "delivery_status": "sent" | "delivered" | "failed"
+        }
+    """
+    try:
+        from .database import get_order_by_id
+        import time
+        import uuid
+        
+        # Verify order belongs to this vendor
+        order = get_order_by_id(order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+        
+        if order.get("vendor_id") != vendor_id:
+            raise HTTPException(status_code=403, detail="Access denied: Order does not belong to you")
+        
+        buyer_id = order.get("buyer_id")
+        platform = "whatsapp" if buyer_id.startswith("wa_") else "instagram"
+        
+        # Build message text
+        message_text = req.message
+        
+        # Handle quick actions
+        if req.quick_action == "confirm_price":
+            amount = order.get("amount", 0)
+            message_text = f"✅ Price confirmed: ₦{amount:,.2f}\n\nPlease proceed with payment to the account details provided."
+        
+        elif req.quick_action == "send_payment_details":
+            # Get vendor's bank details (would come from vendor profile)
+            message_text = (
+                "💳 *Payment Details*\n\n"
+                "Bank: Access Bank\n"
+                "Account: 0123456789\n"
+                "Name: Ada's Fashion\n"
+                f"Amount: ₦{order.get('amount', 0):,.2f}\n"
+                f"Reference: {order_id}\n\n"
+                "Please send payment receipt after transfer."
+            )
+        
+        elif req.quick_action == "request_receipt":
+            message_text = "📸 Please upload your payment receipt to complete this order. Click the button below to upload."
+        
+        # TODO: Send message via Meta API (WhatsApp/Instagram)
+        # For now, log it
+        message_id = f"msg_{uuid.uuid4().hex[:12]}"
+        sent_at = int(time.time())
+        
+        from common.logger import logger
+        logger.info(
+            f"Vendor message sent",
+            extra={
+                "vendor_id": vendor_id,
+                "order_id": order_id,
+                "buyer_id": buyer_id,
+                "platform": platform,
+                "message_id": message_id,
+                "quick_action": req.quick_action
+            }
+        )
+        
+        return format_response("success", "Message sent to buyer", {
+            "message_id": message_id,
+            "sent_at": sent_at,
+            "delivery_status": "sent",
+            "platform": platform,
+            "quick_action_applied": req.quick_action
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send message: {str(e)}")
+
+
+@router.get("/orders/{order_id}/messages")
+async def get_chat_history(
+    order_id: str,
+    limit: int = 50,
+    vendor_id: str = Depends(get_current_vendor)
+):
+    """
+    Get chat history for an order (negotiation interface).
+    
+    Query params:
+        - limit: Max messages to return (default 50)
+    
+    Returns:
+        {
+            "messages": [
+                {
+                    "message_id": "msg_123",
+                    "sender": "buyer" | "vendor",
+                    "text": "Hello, is this available?",
+                    "timestamp": 1732012345,
+                    "time_ago": "2h ago"
+                }
+            ],
+            "total_count": number
+        }
+    """
+    try:
+        from .database import get_order_by_id
+        
+        # Verify order belongs to this vendor
+        order = get_order_by_id(order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+        
+        if order.get("vendor_id") != vendor_id:
+            raise HTTPException(status_code=403, detail="Access denied: Order does not belong to you")
+        
+        # TODO: Fetch actual chat history from database or Meta API
+        # For now, return mock data
+        messages = [
+            {
+                "message_id": "msg_001",
+                "sender": "buyer",
+                "text": "Hello, is this dress still available?",
+                "timestamp": 1732000000,
+                "time_ago": _time_ago(1732000000)
+            },
+            {
+                "message_id": "msg_002",
+                "sender": "vendor",
+                "text": "Yes, it's available. The price is ₦12,500.",
+                "timestamp": 1732000300,
+                "time_ago": _time_ago(1732000300)
+            },
+            {
+                "message_id": "msg_003",
+                "sender": "buyer",
+                "text": "Can you do ₦11,000?",
+                "timestamp": 1732000600,
+                "time_ago": _time_ago(1732000600)
+            },
+            {
+                "message_id": "msg_004",
+                "sender": "vendor",
+                "text": "Best price is ₦12,000. Final offer.",
+                "timestamp": 1732000900,
+                "time_ago": _time_ago(1732000900)
+            }
+        ]
+        
+        return format_response("success", f"Retrieved {len(messages)} messages", {
+            "messages": messages,
+            "total_count": len(messages),
+            "order_id": order_id
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve chat history: {str(e)}")
+
+
+# ========== UTILITY FUNCTIONS ==========
+
+def _time_ago(timestamp: int) -> str:
+    """Convert Unix timestamp to human-readable time ago string."""
+    import time
+    
+    if timestamp == 0:
+        return "Never"
+    
+    diff = int(time.time()) - timestamp
+    
+    if diff < 60:
+        return "Just now"
+    elif diff < 3600:
+        minutes = diff // 60
+        return f"{minutes}m ago"
+    elif diff < 86400:
+        hours = diff // 3600
+        return f"{hours}h ago"
+    elif diff < 604800:
+        days = diff // 86400
+        return f"{days}d ago"
+    else:
+        weeks = diff // 604800
+        return f"{weeks}w ago"

@@ -2,80 +2,79 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from auth_service.auth_routes import router as auth_router
-from auth_service.auth_logic import _users_db
-from auth_service.otp_manager import _otp_store
-from backend.app import app  # assuming app.py exposes FastAPI app
+from unittest.mock import patch, MagicMock
+from app import app
 
-# Mount auth router on test app
-app.include_router(auth_router, prefix="/auth")
 client = TestClient(app)
 
+@pytest.fixture
+def mock_db_functions():
+    with patch("auth_service.auth_logic.create_ceo") as mock_create_ceo, \
+         patch("auth_service.auth_logic.get_user_by_email") as mock_get_email, \
+         patch("auth_service.auth_logic.get_user_by_phone") as mock_get_phone, \
+         patch("auth_service.auth_logic.request_otp") as mock_request_otp:
+        yield {
+            "create_ceo": mock_create_ceo,
+            "get_user_by_email": mock_get_email,
+            "get_user_by_phone": mock_get_phone,
+            "request_otp": mock_request_otp
+        }
 
-def setup_function():
-    """Clear in-memory stores before each test."""
-    _users_db.clear()
-    _otp_store.clear()
-
-
-def test_register_user_success():
-    """Test successful user registration."""
-    payload = {"email": "user@example.com", "phone": "08012345678", "name": "John Doe"}
-    response = client.post("/auth/register", json=payload)
+def test_register_ceo_success(mock_db_functions):
+    """Test successful CEO registration."""
+    mock_db_functions["request_otp"].return_value = {"delivery_method": "email"}
+    
+    payload = {
+        "name": "John CEO",
+        "phone": "+2348012345678",
+        "email": "ceo@example.com"
+    }
+    
+    response = client.post("/auth/ceo/register", json=payload)
+    
     assert response.status_code == 201
     data = response.json()
-    assert data["message"] == "User registered successfully"
-    assert "user_id" in data
+    assert data["status"] == "success"
+    assert "ceo_id" in data["data"]
+    
+    # Verify DB call
+    mock_db_functions["create_ceo"].assert_called_once()
 
-
-def test_register_user_invalid_email():
-    """Test registration with invalid email format."""
-    payload = {"email": "invalid-email", "phone": "08012345678", "name": "John Doe"}
-    response = client.post("/auth/register", json=payload)
+def test_register_ceo_invalid_phone(mock_db_functions):
+    """Test registration with invalid phone format."""
+    payload = {
+        "name": "John CEO",
+        "phone": "12345", # Invalid
+        "email": "ceo@example.com"
+    }
+    
+    response = client.post("/auth/ceo/register", json=payload)
     assert response.status_code == 400
 
-
-def test_login_user_success(monkeypatch):
-    """Test login endpoint sends OTP successfully."""
-    # First register a user
-    reg_resp = client.post("/auth/register", json={
-        "email": "user2@example.com", "phone": "08012345679", "name": "Jane Doe"
-    })
-    user_id = reg_resp.json()["user_id"]
+def test_login_ceo_success(mock_db_functions):
+    """Test CEO login sends OTP."""
+    # Mock user found
+    mock_db_functions["get_user_by_email"].return_value = {
+        "user_id": "ceo_123",
+        "status": "active",
+        "phone": "+2348012345678"
+    }
+    mock_db_functions["request_otp"].return_value = {"delivery_method": "email"}
     
-    # Stub send_otp to avoid real SMS
-    monkeypatch.setattr("auth_service.otp_manager.send_otp", lambda phone, otp: None)
+    payload = {"contact": "ceo@example.com"}
+    response = client.post("/auth/ceo/login", json=payload)
     
-    response = client.post("/auth/login", json={"user_id": user_id})
     assert response.status_code == 200
-    assert response.json()["message"] == "OTP sent"
-    # OTP store should have an entry
-    assert user_id in _otp_store
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["data"]["ceo_id"] == "ceo_123"
 
-
-def test_login_user_not_found():
-    """Test login with non-existent user returns error."""
-    response = client.post("/auth/login", json={"user_id": "nonexistent"})
+def test_login_ceo_not_found(mock_db_functions):
+    """Test login with unknown user."""
+    mock_db_functions["get_user_by_email"].return_value = None
+    
+    payload = {"contact": "unknown@example.com"}
+    response = client.post("/auth/ceo/login", json=payload)
+    
     assert response.status_code == 400
-
-
-def test_verify_otp_success(monkeypatch):
-    """Test OTP verification success."""
-    # Prepare OTP store
-    user_id = "user-1"
-    _otp_store[user_id] = ("ABC123!@", __import__("datetime").datetime.utcnow())
-    
-    response = client.post("/auth/verify-otp", json={"user_id": user_id, "otp": "ABC123!@"})
-    assert response.status_code == 200
-    assert response.json()["message"] == "OTP verified successfully"
-    # OTP should be removed after successful verification
-    assert user_id not in _otp_store
-
-
-def test_verify_otp_invalid():
-    """Test OTP verification with wrong code."""
-    user_id = "user-2"
-    _otp_store[user_id] = ("XYZ789!@", __import__("datetime").datetime.utcnow())
-    
-    response = client.post("/auth/verify-otp", json={"user_id": user_id, "otp": "WRONG"})
-    assert response.status_code == 401
+    assert "not found" in response.json()["detail"]

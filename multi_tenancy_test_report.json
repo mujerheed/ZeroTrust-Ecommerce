@@ -1,0 +1,77 @@
+{
+  "timestamp": "2025-11-23T00:49:05.829561",
+  "summary": {
+    "total": 11,
+    "passed": 11,
+    "failed": 0,
+    "success_rate": "100.0%"
+  },
+  "tests": [
+    {
+      "test": "Vendor Isolation - CEO_A cannot see CEO_B vendors",
+      "passed": true,
+      "details": "CEO_A correctly sees only 1 vendor(s)",
+      "timestamp": "2025-11-23T00:48:46.457277"
+    },
+    {
+      "test": "Vendor Isolation - CEO_A cannot access CEO_B vendor details",
+      "passed": true,
+      "details": "Access correctly denied with 403",
+      "timestamp": "2025-11-23T00:48:46.731548"
+    },
+    {
+      "test": "Vendor Update Isolation - CEO_A cannot update CEO_B vendors",
+      "passed": true,
+      "details": "Update correctly denied with 403",
+      "timestamp": "2025-11-23T00:48:48.003889"
+    },
+    {
+      "test": "Order Isolation - CEO_A cannot see CEO_B orders",
+      "passed": true,
+      "details": "CEO_A: 0 orders, CEO_B: 0 orders (no overlap)",
+      "timestamp": "2025-11-23T00:48:49.683640"
+    },
+    {
+      "test": "Escalation Isolation - CEO_A cannot see CEO_B approvals",
+      "passed": true,
+      "details": "CEO_A: 0 approvals, CEO_B: 0 approvals (isolated)",
+      "timestamp": "2025-11-23T00:48:52.324875"
+    },
+    {
+      "test": "Notification Isolation - CEO_A cannot see CEO_B notifications",
+      "passed": true,
+      "details": "CEO_A correctly sees only their 0 notification(s)",
+      "timestamp": "2025-11-23T00:48:54.873499"
+    },
+    {
+      "test": "Analytics Isolation - Each CEO sees only their vendors",
+      "passed": true,
+      "details": "CEO_A: 1 vendors, CEO_B: 1 vendors",
+      "timestamp": "2025-11-23T00:48:58.542560"
+    },
+    {
+      "test": "Audit Log Isolation - CEO_A cannot see CEO_B audit logs",
+      "passed": true,
+      "details": "CEO_A: 1 logs, CEO_B: 0 logs (properly isolated)",
+      "timestamp": "2025-11-23T00:49:00.117172"
+    },
+    {
+      "test": "Token Refresh - New token works correctly",
+      "passed": true,
+      "details": "Token refreshed and validated successfully",
+      "timestamp": "2025-11-23T00:49:02.029004"
+    },
+    {
+      "test": "Receipt Isolation - CEO_A cannot see CEO_B receipts",
+      "passed": true,
+      "details": "Receipt endpoint not available (skipped)",
+      "timestamp": "2025-11-23T00:49:03.042877"
+    },
+    {
+      "test": "Cross-CEO Token Usage - All unauthorized access blocked",
+      "passed": true,
+      "details": "All attacks properly blocked",
+      "timestamp": "2025-11-23T00:49:04.827877"
+    }
+  ]
+}

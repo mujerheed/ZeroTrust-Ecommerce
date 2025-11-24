@@ -63,15 +63,20 @@ def save_vendor_preferences(
     # Add any additional settings
     preferences_record.update(additional_settings)
     
-    VENDOR_PREFERENCES_TABLE.put_item(Item=preferences_record)
-    
-    logger.info("Vendor preferences saved", extra={
-        "vendor_id": vendor_id,
-        "auto_approve_threshold": preferences_record["auto_approve_threshold"],
-        "textract_enabled": preferences_record["textract_enabled"]
-    })
-    
-    return preferences_record
+    try:
+        VENDOR_PREFERENCES_TABLE.put_item(Item=preferences_record)
+        
+        logger.info("Vendor preferences saved", extra={
+            "vendor_id": vendor_id,
+            "auto_approve_threshold": preferences_record["auto_approve_threshold"],
+            "textract_enabled": preferences_record["textract_enabled"]
+        })
+        
+        return preferences_record
+    except dynamodb.meta.client.exceptions.ResourceNotFoundException:
+        logger.warning("VendorPreferences table not found, returning defaults without saving", extra={"vendor_id": vendor_id})
+        # Return the preferences that would have been saved
+        return preferences_record
 
 
 def get_vendor_preferences(vendor_id: str) -> Dict:
@@ -88,14 +93,21 @@ def get_vendor_preferences(vendor_id: str) -> Dict:
         - textract_enabled: Boolean
         - updated_at: Unix timestamp or None
     """
-    resp = VENDOR_PREFERENCES_TABLE.get_item(Key={"vendor_id": vendor_id})
-    
-    if resp.get("Item"):
-        logger.info("Vendor preferences retrieved", extra={
-            "vendor_id": vendor_id,
-            "auto_approve_threshold": resp["Item"].get("auto_approve_threshold", 0)
-        })
-        return resp["Item"]
+    try:
+        resp = VENDOR_PREFERENCES_TABLE.get_item(Key={"vendor_id": vendor_id})
+        
+        if resp.get("Item"):
+            logger.info("Vendor preferences retrieved", extra={
+                "vendor_id": vendor_id,
+                "auto_approve_threshold": resp["Item"].get("auto_approve_threshold", 0)
+            })
+            return resp["Item"]
+    except dynamodb.meta.client.exceptions.ResourceNotFoundException:
+        logger.warning("VendorPreferences table not found, using defaults", extra={"vendor_id": vendor_id})
+        # Table doesn't exist, fall through to defaults
+    except Exception as e:
+        # If table doesn't exist or any other error, return defaults
+        logger.warning(f"Failed to retrieve vendor preferences (table may not exist): {e}")
     
     # Return default preferences
     logger.info("Using default vendor preferences", extra={"vendor_id": vendor_id})

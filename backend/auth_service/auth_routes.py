@@ -17,6 +17,7 @@ from .utils import (
     rate_limit_check, log_security_event
 )
 from ceo_service.utils import verify_ceo_token
+from common.security import create_jwt, decode_jwt
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
@@ -34,26 +35,34 @@ async def ceo_register(request: Request, req: CEORegisterRequest):
     Sends 6-character digits+symbols OTP for verification.
     """
     try:
-        # Rate limiting for registration attempts
-        rate_limit_check(request.client.host, "ceo_register", max_attempts=3, window_minutes=60)
+        # Rate limiting for registration attempts (10 per hour for better usability)
+        rate_limit_check(request.client.host, "ceo_register", max_attempts=10, window_minutes=60)
         
         # Validation
         validate_phone_number(req.phone)
         validate_email(req.email)
         
         # Create CEO account and send OTP
-        ceo_id = register_ceo(req.name, req.phone, req.email)
+        result = register_ceo(req.name, req.phone, req.email)
+        ceo_id = result.get("ceo_id") if isinstance(result, dict) else result
+        dev_otp = result.get("dev_otp") if isinstance(result, dict) else None
         
         log_security_event(ceo_id, "CEO_REGISTER_INITIATED", {
             "ip": request.client.host,
             "email": req.email
         })
         
-        return format_response("success", "CEO registration initiated. Check SMS/Email for 6-digit OTP.", {
+        response_data = {
             "ceo_id": ceo_id,
             "otp_format": "6-digit numbers + symbols",
             "ttl_minutes": 5
-        })
+        }
+        
+        # Add dev_otp for testing in DEBUG mode
+        if dev_otp is not None:
+            response_data["dev_otp"] = dev_otp
+        
+        return format_response("success", "CEO registration initiated. Check SMS/Email for 6-digit OTP.", response_data)
         
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -68,23 +77,44 @@ async def ceo_login(request: Request, req: CEOLoginRequest):
     CEO login with phone/email as per proposal.
     Sends 6-character digits+symbols OTP.
     """
+    from common.logger import logger
+    
     try:
-        rate_limit_check(request.client.host, "ceo_login", max_attempts=5, window_minutes=15)
+        # Rate limiting: 10 login attempts per hour
+        rate_limit_check(request.client.host, "ceo_login", max_attempts=10, window_minutes=60)
         
-        ceo_id = login_ceo(req.contact)
+        logger.info(f"CEO login request for contact: {req.contact[:4]}****")
+        result = login_ceo(req.contact)
+        ceo_id = result.get("ceo_id") if isinstance(result, dict) else result
+        dev_otp = result.get("dev_otp") if isinstance(result, dict) else None
         
         log_security_event(ceo_id, "CEO_LOGIN_OTP_SENT", {
             "ip": request.client.host,
             "contact_method": "email" if "@" in req.contact else "phone"
         })
         
-        return format_response("success", "CEO OTP sent. Check SMS/Email for 6-digit code.", {
+        response_data = {
             "ceo_id": ceo_id,
-            "otp_format": "6-digit numbers + symbols"
-        })
+            "otp_format": "6-digit numbers + symbols",
+            "ttl_minutes": 5
+        }
         
+        # Add dev_otp for testing in DEBUG mode
+        if dev_otp is not None:
+            response_data["dev_otp"] = dev_otp
+        
+        logger.info(f"✅ CEO OTP sent successfully to {req.contact[:4]}****")
+        
+        return format_response("success", "CEO OTP sent. Check SMS/Email for 6-digit code.", response_data)
+        
+    except ValueError as e:
+        # Expected errors (CEO not found, inactive, etc.)
+        logger.warning(f"❌ CEO login failed: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # Unexpected errors (AWS, database, etc.)
+        logger.error(f"🔥 CEO login unexpected error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
 # ========== VENDOR LOGIN (CEO Pre-registered) ==========
 class VendorLoginRequest(BaseModel):
@@ -96,24 +126,51 @@ async def vendor_login(request: Request, req: VendorLoginRequest):
     Vendor login with phone number (CEO must have registered vendor).
     Sends 8-character alphanumeric+special OTP.
     """
+    from common.logger import logger
+    
     try:
         rate_limit_check(request.client.host, "vendor_login", max_attempts=5, window_minutes=15)
         
         validate_phone_number(req.phone)
-        vendor_id = login_vendor(req.phone)
+        
+        logger.info(f"Vendor login request for phone: {req.phone[-4:]}****")
+        result = login_vendor(req.phone)
+        
+        # Handle both old return format (vendor_id string) and new format (dict with dev_otp)
+        if isinstance(result, dict):
+            vendor_id = result.get("vendor_id")
+            dev_otp = result.get("dev_otp")
+        else:
+            vendor_id = result
+            dev_otp = None
         
         log_security_event(vendor_id, "VENDOR_LOGIN_OTP_SENT", {
             "ip": request.client.host,
             "phone": req.phone[-4:]  # Log last 4 digits only
         })
         
-        return format_response("success", "Vendor OTP sent to registered phone.", {
+        response_data = {
             "vendor_id": vendor_id,
-            "otp_format": "8-character alphanumeric + symbols"
-        })
+            "otp_format": "8-character alphanumeric + symbols",
+            "ttl_minutes": 5
+        }
         
+        # Add dev_otp for testing in DEBUG mode
+        if dev_otp is not None:
+            response_data["dev_otp"] = dev_otp
+        
+        logger.info(f"✅ Vendor OTP sent successfully to {req.phone[-4:]}****")
+        
+        return format_response("success", "Vendor OTP sent to registered phone.", response_data)
+        
+    except ValueError as e:
+        # Expected errors (vendor not found, inactive, etc.)
+        logger.warning(f"❌ Vendor login failed: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=404, detail="Vendor not found. Contact CEO for registration.")
+        # Unexpected errors (AWS, database, etc.)
+        logger.error(f"🔥 Vendor login unexpected error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
 # ========== UNIVERSAL OTP VERIFICATION ==========
 class VerifyOTPRequest(BaseModel):
@@ -145,7 +202,8 @@ async def verify_otp(request: Request, req: VerifyOTPRequest):
         return format_response("success", f"{result['role']} authentication successful.", {
             "token": result["token"],
             "role": result["role"],
-            "expires_minutes": 30
+            "user_id": req.user_id,
+            "expires_minutes": 60  # Updated to match new JWT expiration
         })
         
     except Exception as e:
@@ -155,6 +213,58 @@ async def verify_otp(request: Request, req: VerifyOTPRequest):
             "error": str(e)
         })
         raise HTTPException(status_code=401, detail="Invalid or expired OTP")
+
+# ========== TOKEN REFRESH ==========
+@router.post("/refresh-token")
+async def refresh_token(request: Request):
+    """
+    Refresh JWT token before expiration.
+    Allows users to extend their session without re-authentication.
+    Token must be valid (not expired) to be refreshed.
+    """
+    try:
+        # Extract token from Authorization header
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+        
+        token = auth_header.split(" ")[1]
+        
+        # Decode and validate current token
+        try:
+            payload = decode_jwt(token)
+        except HTTPException as e:
+            # If token is expired, user must re-authenticate
+            raise HTTPException(
+                status_code=401, 
+                detail="Token expired. Please log in again to renew your session."
+            )
+        
+        user_id = payload.get("sub")
+        role = payload.get("role")
+        
+        if not user_id or not role:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+        
+        # Generate new token with fresh expiration
+        new_token = create_jwt(user_id, role, expires_minutes=60)
+        
+        log_security_event(user_id, "TOKEN_REFRESHED", {
+            "ip": request.client.host,
+            "role": role
+        })
+        
+        return format_response("success", "Token refreshed successfully.", {
+            "token": new_token,
+            "role": role,
+            "user_id": user_id,
+            "expires_minutes": 60
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 # ========== WEBHOOK FOR BUYER BOT (Optimization) ==========
 @router.post("/webhook/buyer-otp")

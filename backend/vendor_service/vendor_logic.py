@@ -18,6 +18,13 @@ from common.escalation_db import create_escalation
 from common.sns_client import send_escalation_alert, send_buyer_notification
 from common.logger import logger
 
+# Import notification creation function
+try:
+    from ceo_service.database import create_notification
+except ImportError:
+    logger.warning("Could not import create_notification - notifications will be disabled")
+    create_notification = None
+
 
 def convert_decimals(obj):
     """
@@ -149,6 +156,30 @@ def create_order_escalation(order: Dict, vendor_id: str, reason: str, notes: str
         f"Escalation created: {escalation_id} for order {order_id}, "
         f"reason={reason}, amount=₦{order.get('amount', 0):,.2f}"
     )
+    
+    # Create in-app notification for CEO
+    if create_notification:
+        try:
+            notification_type = "escalation" if reason == "HIGH_VALUE" else "alert"
+            title = "⚠️ High-Value Transaction" if reason == "HIGH_VALUE" else "🚨 Order Flagged for Review"
+            message = f"Order #{order_id[:8]} (₦{order.get('amount', 0):,.0f}) requires your approval"
+            
+            create_notification(
+                ceo_id=ceo_id,
+                notification_type=notification_type,
+                title=title,
+                message=message,
+                order_id=order_id,
+                vendor_id=vendor_id,
+                metadata={
+                    "reason": reason,
+                    "amount": float(order.get("amount", 0)),
+                    "escalation_id": escalation_id
+                }
+            )
+            logger.info(f"Created notification for CEO {ceo_id} - escalation {escalation_id}")
+        except Exception as e:
+            logger.error(f"Failed to create notification for escalation {escalation_id}: {e}")
     
     # Send CEO alert (SMS + Email via SNS)
     vendor = get_vendor(vendor_id)

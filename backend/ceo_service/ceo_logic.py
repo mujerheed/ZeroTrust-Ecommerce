@@ -93,8 +93,18 @@ def verify_ceo_otp(ceo_id: str, submitted_otp: str) -> bool:
         })
         return False
     
-    if record.get("otp_code") != submitted_otp:
-        logger.warning("OTP mismatch", extra={"ceo_id": ceo_id})
+    # Strip whitespace and compare
+    stored_otp = str(record.get("otp_code", "")).strip()
+    submitted_otp = str(submitted_otp).strip()
+    
+    if stored_otp != submitted_otp:
+        logger.warning("OTP mismatch", extra={
+            "ceo_id": ceo_id,
+            "stored_otp_length": len(stored_otp),
+            "submitted_otp_length": len(submitted_otp),
+            "stored_first_char": stored_otp[0] if stored_otp else None,
+            "submitted_first_char": submitted_otp[0] if submitted_otp else None
+        })
         return False
     
     # Check expiration
@@ -386,6 +396,10 @@ def onboard_vendor(ceo_id: str, name: str, email: str, phone: str) -> Dict[str, 
     Returns:
         Created vendor record with OTP sent status
     """
+    # Normalize phone number to +234 format
+    from auth_service.auth_logic import normalize_phone
+    normalized_phone = normalize_phone(phone)
+    
     # Verify CEO exists
     ceo = get_ceo_by_id(ceo_id)
     if not ceo:
@@ -395,29 +409,36 @@ def onboard_vendor(ceo_id: str, name: str, email: str, phone: str) -> Dict[str, 
     vendor_data = {
         "name": name,
         "email": email.lower(),
-        "phone": phone,
+        "phone": normalized_phone,
         "ceo_id": ceo_id,  # Multi-tenancy
         "created_by": ceo_id,
         "verified": False,  # Will be verified via OTP on first login
+        "status": "active",  # Set active status for login
     }
     
     vendor_id = create_vendor(vendor_data)
     
-    # Generate and send OTP for first login
-    from auth_service.otp_manager import generate_otp, store_otp
-    otp = generate_otp(role="Vendor")
-    store_otp(vendor_id, otp, role="Vendor")
-    
-    # Send OTP to vendor (via SMS to phone)
+    # Generate and send OTP for first login using request_otp (consistent with CEO flow)
+    from auth_service.otp_manager import request_otp
+    dev_otp = None
     try:
-        from common.config import settings
-        import boto3
-        sns = boto3.client('sns', region_name=settings.AWS_REGION)
-        message = f"Welcome to TrustGuard! Your vendor account has been created. Use this OTP to login: {otp}. Valid for 5 minutes."
-        sns.publish(PhoneNumber=phone, Message=message)
-        logger.info(f"Vendor OTP sent via SMS", extra={"vendor_id": vendor_id, "phone": phone})
+        otp_result = request_otp(
+            user_id=vendor_id,
+            role="Vendor",
+            contact=normalized_phone,
+            platform=None,
+            phone=normalized_phone
+        )
+        dev_otp = otp_result.get('dev_otp')
+        logger.info(f"Vendor OTP sent via {otp_result.get('delivery_method')}", extra={
+            "vendor_id": vendor_id,
+            "phone": normalized_phone
+        })
     except Exception as e:
-        logger.warning(f"Failed to send vendor OTP via SMS: {e}", extra={"vendor_id": vendor_id})
+        logger.warning(f"Failed to send vendor OTP: {e}", extra={"vendor_id": vendor_id})
+    
+    # Include dev_otp in DEBUG mode for testing
+    # (already included in otp_result from request_otp)
     
     # Log vendor creation
     write_audit_log(
@@ -438,7 +459,8 @@ def onboard_vendor(ceo_id: str, name: str, email: str, phone: str) -> Dict[str, 
     
     return {
         "vendor": vendor,
-        "message": "Vendor onboarded successfully. OTP sent to vendor's phone for first login."
+        "message": "Vendor onboarded successfully. OTP sent to vendor's phone for first login.",
+        "dev_otp": dev_otp  # Include for testing in DEBUG mode
     }
 
 
@@ -524,6 +546,94 @@ def list_vendors_for_ceo(ceo_id: str) -> List[Dict[str, Any]]:
     return vendors
 
 
+def get_vendor_details_for_ceo(ceo_id: str, vendor_id: str) -> Dict[str, Any]:
+    """
+    Get detailed vendor information including orders, buyers, and flags.
+    
+    Args:
+        ceo_id: CEO identifier
+        vendor_id: Vendor identifier
+    
+    Returns:
+        Dict with vendor info, orders, unique buyers, and flagged orders
+    
+    Raises:
+        ValueError: If vendor not found or not owned by CEO
+    """
+    # Verify vendor exists and belongs to CEO
+    vendor = get_vendor_by_id(vendor_id)
+    if not vendor:
+        raise ValueError("Vendor not found")
+    
+    if vendor.get("ceo_id") != ceo_id:
+        raise ValueError("Unauthorized: Vendor does not belong to this CEO")
+    
+    # Get all orders for this vendor
+    orders = get_orders_for_ceo(ceo_id, vendor_id=vendor_id, limit=1000)
+    
+    # Calculate statistics
+    total_orders = len(orders)
+    completed_orders = [o for o in orders if o.get("order_status") == "completed"]
+    flagged_orders = [o for o in orders if o.get("order_status") == "flagged"]
+    pending_orders = [o for o in orders if o.get("order_status") in ["pending", "pending_receipt"]]
+    
+    total_revenue = sum(float(o.get("amount", 0)) for o in completed_orders)
+    
+    # Get unique buyers
+    unique_buyers = {}
+    for order in orders:
+        buyer_id = order.get("buyer_id")
+        if buyer_id and buyer_id not in unique_buyers:
+            unique_buyers[buyer_id] = {
+                "buyer_id": buyer_id,
+                "buyer_name": order.get("buyer_name", "Unknown"),
+                "phone": order.get("buyer_phone", ""),
+                "total_orders": 0,
+                "total_spent": 0
+            }
+        if buyer_id:
+            unique_buyers[buyer_id]["total_orders"] += 1
+            unique_buyers[buyer_id]["total_spent"] += float(order.get("amount", 0))
+    
+    # Sort orders by most recent
+    recent_orders = sorted(orders, key=lambda x: x.get("created_at", 0), reverse=True)[:20]
+    
+    # Prepare vendor info without sensitive data
+    vendor_info = {
+        "vendor_id": vendor.get("user_id"),
+        "name": vendor.get("name"),
+        "email": vendor.get("email"),
+        "phone": vendor.get("phone"),
+        "created_at": vendor.get("created_at"),
+        "updated_at": vendor.get("updated_at"),
+        "verified": vendor.get("verified", False),
+        "status": vendor.get("status", "pending"),
+        "risk_score": calculate_vendor_risk_score(vendor_id, ceo_id)
+    }
+    
+    logger.info("Vendor details retrieved", extra={
+        "ceo_id": ceo_id,
+        "vendor_id": vendor_id,
+        "total_orders": total_orders,
+        "unique_buyers": len(unique_buyers)
+    })
+    
+    return {
+        "vendor": vendor_info,
+        "statistics": {
+            "total_orders": total_orders,
+            "completed_orders": len(completed_orders),
+            "flagged_orders": len(flagged_orders),
+            "pending_orders": len(pending_orders),
+            "total_revenue": total_revenue,
+            "unique_buyers": len(unique_buyers)
+        },
+        "recent_orders": recent_orders,
+        "buyers": list(unique_buyers.values()),
+        "flagged_orders": flagged_orders
+    }
+
+
 def remove_vendor_by_ceo(ceo_id: str, vendor_id: str):
     """
     Remove a vendor (CEO authorization required).
@@ -565,6 +675,154 @@ def remove_vendor_by_ceo(ceo_id: str, vendor_id: str):
     })
 
 
+def update_vendor_by_ceo(
+    ceo_id: str,
+    vendor_id: str,
+    name: str = None,
+    email: str = None,
+    phone: str = None,
+    status: str = None
+) -> Dict[str, Any]:
+    """
+    Update vendor details (CEO authorization required).
+    
+    Args:
+        ceo_id: CEO identifier
+        vendor_id: Vendor identifier to update
+        name: New name (optional)
+        email: New email (optional)
+        phone: New phone number (optional)
+        status: New status: active, suspended, pending (optional)
+    
+    Returns:
+        Updated vendor record
+    
+    Raises:
+        ValueError: If vendor not found, not owned by CEO, or invalid data
+    """
+    from auth_service.auth_logic import normalize_phone
+    from auth_service.database import get_user_by_email, get_user_by_phone
+    from common.db_connection import dynamodb
+    from common.config import settings
+    
+    USERS_TABLE_NAME = settings.USERS_TABLE
+    
+    # Verify vendor exists and belongs to CEO
+    vendor = get_vendor_by_id(vendor_id)
+    if not vendor:
+        raise ValueError("Vendor not found")
+    
+    if vendor.get("ceo_id") != ceo_id:
+        logger.warning("CEO attempted to update vendor from another CEO", extra={
+            "ceo_id": ceo_id,
+            "vendor_id": vendor_id,
+            "vendor_ceo_id": vendor.get("ceo_id")
+        })
+        raise ValueError("Unauthorized: Vendor belongs to another CEO")
+    
+    # Build update data
+    update_data = {}
+    update_expression_parts = []
+    expression_attribute_values = {}
+    expression_attribute_names = {}
+    
+    # Update name if provided
+    if name is not None and name.strip():
+        update_data["name"] = name.strip()
+        update_expression_parts.append("#name = :name")
+        expression_attribute_values[":name"] = name.strip()
+        expression_attribute_names["#name"] = "name"
+    
+    # Update email if provided
+    if email is not None and email.strip():
+        email_lower = email.strip().lower()
+        
+        # Check if email is already in use by another user
+        existing_user = get_user_by_email(email_lower)
+        if existing_user and existing_user.get("user_id") != vendor_id:
+            raise ValueError(f"Email {email_lower} is already in use")
+        
+        update_data["email"] = email_lower
+        update_expression_parts.append("email = :email")
+        expression_attribute_values[":email"] = email_lower
+    
+    # Update phone if provided
+    if phone is not None and phone.strip():
+        normalized_phone = normalize_phone(phone.strip())
+        
+        # Check if phone is already in use by another user
+        existing_user = get_user_by_phone(normalized_phone)
+        if existing_user and existing_user.get("user_id") != vendor_id:
+            raise ValueError(f"Phone {normalized_phone} is already in use")
+        
+        update_data["phone"] = normalized_phone
+        update_expression_parts.append("phone = :phone")
+        expression_attribute_values[":phone"] = normalized_phone
+    
+    # Update status if provided
+    if status is not None:
+        allowed_statuses = ["active", "suspended", "pending"]
+        if status not in allowed_statuses:
+            raise ValueError(f"Invalid status. Must be one of: {', '.join(allowed_statuses)}")
+        
+        update_data["status"] = status
+        update_expression_parts.append("#status = :status")
+        expression_attribute_values[":status"] = status
+        expression_attribute_names["#status"] = "status"
+    
+    # If nothing to update
+    if not update_expression_parts:
+        raise ValueError("No fields to update")
+    
+    # Add updated_at timestamp
+    current_timestamp = int(time.time())
+    update_expression_parts.append("updated_at = :updated_at")
+    expression_attribute_values[":updated_at"] = current_timestamp
+    
+    # Build the update expression
+    update_expression = "SET " + ", ".join(update_expression_parts)
+    
+    # Update in database
+    table = dynamodb.Table(USERS_TABLE_NAME)
+    
+    update_params = {
+        "Key": {"user_id": vendor_id},
+        "UpdateExpression": update_expression,
+        "ExpressionAttributeValues": expression_attribute_values,
+        "ReturnValues": "ALL_NEW"
+    }
+    
+    if expression_attribute_names:
+        update_params["ExpressionAttributeNames"] = expression_attribute_names
+    
+    response = table.update_item(**update_params)
+    
+    updated_vendor = response.get("Attributes", {})
+    
+    # Log update
+    write_audit_log(
+        ceo_id=ceo_id,
+        action="vendor_updated",
+        user_id=ceo_id,
+        details={
+            "vendor_id": vendor_id,
+            "updated_fields": list(update_data.keys()),
+            "changes": update_data
+        }
+    )
+    
+    logger.info("Vendor updated by CEO", extra={
+        "ceo_id": ceo_id,
+        "vendor_id": vendor_id,
+        "updated_fields": list(update_data.keys())
+    })
+    
+    # Remove sensitive data
+    updated_vendor.pop("password_hash", None)
+    
+    return updated_vendor
+
+
 # ==================== Dashboard & Reporting ====================
 
 def get_dashboard_metrics(ceo_id: str) -> Dict[str, Any]:
@@ -599,28 +857,52 @@ def get_pending_approvals(ceo_id: str) -> Dict[str, Any]:
         ceo_id: CEO identifier
     
     Returns:
-        Dictionary with flagged orders and high-value orders
+        Dictionary with combined pending approvals list
     """
+    from ceo_service.database import get_vendor_by_id
+    
     flagged = get_flagged_orders_for_ceo(ceo_id)
     high_value = get_high_value_orders_for_ceo(ceo_id)
     
-    # Filter out duplicates (order can be both flagged and high-value)
-    high_value_ids = {order["order_id"] for order in high_value}
+    # Mark each order with escalation reason
+    for order in flagged:
+        order["escalation_reason"] = "flagged"
+        # Enrich with vendor name
+        vendor = get_vendor_by_id(order.get("vendor_id"))
+        if vendor:
+            order["vendor_name"] = vendor.get("name", "Unknown")
+    
+    for order in high_value:
+        # Check if already in flagged (avoid duplicates)
+        if not any(f["order_id"] == order["order_id"] for f in flagged):
+            order["escalation_reason"] = "high_value"
+            # Enrich with vendor name
+            vendor = get_vendor_by_id(order.get("vendor_id"))
+            if vendor:
+                order["vendor_name"] = vendor.get("name", "Unknown")
+    
+    # Combine lists, avoiding duplicates
+    flagged_ids = {order["order_id"] for order in flagged}
     unique_high_value = [
         order for order in high_value 
-        if order["order_id"] not in {f["order_id"] for f in flagged}
+        if order["order_id"] not in flagged_ids
     ]
+    
+    # Create unified list
+    pending_approvals = flagged + unique_high_value
     
     logger.info("Pending approvals retrieved", extra={
         "ceo_id": ceo_id,
         "flagged_count": len(flagged),
-        "high_value_count": len(unique_high_value)
+        "high_value_count": len(unique_high_value),
+        "total_pending": len(pending_approvals)
     })
     
     return {
-        "flagged_orders": flagged,
-        "high_value_orders": unique_high_value,
-        "total_pending": len(flagged) + len(unique_high_value)
+        "pending_approvals": pending_approvals,
+        "total_pending": len(pending_approvals),
+        "flagged_count": len(flagged),
+        "high_value_count": len(unique_high_value)
     }
 
 
@@ -659,8 +941,9 @@ def approve_order(ceo_id: str, order_id: str, otp: str = None, notes: str = None
         if not verify_ceo_otp(ceo_id, otp):
             raise ValueError("Invalid or expired OTP")
     
-    # Update order status to approved/verified
-    new_status = "approved" if order.get("order_status") == "flagged" else "confirmed"
+    # Update order status to approved (CEO has verified it)
+    # Previously flagged or high-value orders are now CEO-approved
+    new_status = "approved"
     update_order_status(
         order_id=order_id,
         new_status=new_status,

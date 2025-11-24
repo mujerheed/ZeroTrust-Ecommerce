@@ -46,6 +46,8 @@ def get_user_by_phone(phone: str, role: str = None) -> dict:
     Returns:
         User record or None if not found
     """
+    from common.logger import logger
+    
     table = dynamodb.Table(USERS_TABLE_NAME)
     
     # Scan with filter (not ideal for production, but works for MVP)
@@ -58,6 +60,11 @@ def get_user_by_phone(phone: str, role: str = None) -> dict:
     
     items = response.get("Items", [])
     
+    logger.info(
+        f"Database phone lookup - Phone: {phone[:8]}***, Role filter: {role}, Found {len(items)} user(s)",
+        extra={"phone_prefix": phone[:8] + "***", "role_filter": role, "results_count": len(items)}
+    )
+    
     # If no role filter, return first match
     if not role:
         return items[0] if items else None
@@ -67,11 +74,14 @@ def get_user_by_phone(phone: str, role: str = None) -> dict:
         # Check roles array (multi-role support)
         if 'roles' in user and isinstance(user['roles'], list):
             if role in user['roles']:
+                logger.info(f"Found user with role '{role}' in roles array")
                 return user
         # Check single role field (legacy)
         elif user.get('role') == role:
+            logger.info(f"Found user with role '{role}' in role field")
             return user
     
+    logger.warning(f"No user found with phone {phone[:8]}*** and role '{role}'")
     return None
 
 
@@ -168,6 +178,56 @@ def create_buyer(
     table.put_item(Item=buyer_record)
     return buyer_record
 
+def create_ceo(ceo_id: str, name: str, phone: str, email: str) -> dict:
+    """
+    Create a new CEO record in Users table.
+    
+    Args:
+        ceo_id: Unique CEO identifier
+        name: CEO's full name
+        phone: CEO's phone number
+        email: CEO's email address
+    
+    Returns:
+        Created CEO record
+    """
+    table = dynamodb.Table(USERS_TABLE_NAME)
+    ceo_record = {
+        "user_id": ceo_id,
+        "role": "CEO",
+        "roles": ["CEO"],  # Support for multi-role schema
+        "name": name,
+        "phone": phone,
+        "email": email,
+        "status": "active",
+        "verified": False,  # Set to True after OTP verification
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+    }
+    
+    table.put_item(Item=ceo_record)
+    return ceo_record
+
+def create_vendor(vendor_id: str, name: str, phone: str, email: str, created_by: str) -> dict:
+    """
+    Create a new vendor record in Users table.
+    """
+    table = dynamodb.Table(USERS_TABLE_NAME)
+    vendor_record = {
+        "user_id": vendor_id,
+        "role": "Vendor",
+        "roles": ["Vendor"],
+        "name": name,
+        "phone": phone,
+        "email": email,
+        "status": "active",
+        "created_by": created_by,
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+    }
+    table.put_item(Item=vendor_record)
+    return vendor_record
+
 def update_user(user_id: str, updates: dict) -> dict:
     """
     Update user record with partial updates.
@@ -214,10 +274,16 @@ def save_otp(user_id: str, otp_code: str, role: str, ttl_seconds: int):
     """
     Store an OTP with TTL for a given user.
     """
+    import uuid
     table = dynamodb.Table(OTPS_TABLE_NAME)
     expires_at = int(time.time()) + ttl_seconds
+    
+    # Generate a unique request_id for this OTP request
+    request_id = str(uuid.uuid4())
+    
     table.put_item(Item={
         "user_id": user_id,
+        "request_id": request_id,
         "otp_code": otp_code,
         "role": role,
         "expires_at": expires_at
@@ -225,18 +291,44 @@ def save_otp(user_id: str, otp_code: str, role: str, ttl_seconds: int):
 
 def get_otp(user_id: str) -> dict:
     """
-    Retrieve the OTP record for a user.
+    Retrieve the most recent OTP record for a user.
+    Since the table has user_id as HASH and request_id as RANGE,
+    we query for all OTPs for this user and return the most recent one.
     """
     table = dynamodb.Table(OTPS_TABLE_NAME)
-    resp  = table.get_item(Key={"user_id": user_id})
-    return resp.get("Item")
+    
+    # Query all OTPs for this user
+    resp = table.query(
+        KeyConditionExpression="user_id = :uid",
+        ExpressionAttributeValues={":uid": user_id},
+        ScanIndexForward=False,  # Sort descending (most recent first)
+        Limit=1
+    )
+    
+    items = resp.get("Items", [])
+    return items[0] if items else None
 
 def delete_otp(user_id: str):
     """
-    Delete a used or expired OTP record.
+    Delete all OTP records for a user.
+    Since the table has a composite key (user_id, request_id),
+    we need to query first to get all request_ids, then delete them.
     """
     table = dynamodb.Table(OTPS_TABLE_NAME)
-    table.delete_item(Key={"user_id": user_id})
+    
+    # Query all OTPs for this user
+    resp = table.query(
+        KeyConditionExpression="user_id = :uid",
+        ExpressionAttributeValues={":uid": user_id}
+    )
+    
+    # Delete each OTP record
+    items = resp.get("Items", [])
+    for item in items:
+        table.delete_item(Key={
+            "user_id": user_id,
+            "request_id": item["request_id"]
+        })
 
 def log_event(user_id: str, action: str, status: str, message: str = None, meta: dict = None):
     """

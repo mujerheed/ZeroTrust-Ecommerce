@@ -68,12 +68,14 @@ def format_response(status: str, message: str, data: Optional[Dict[str, Any]] = 
 
 def validate_phone_number(phone: str) -> bool:
     """
-    Validate Nigerian phone number format.
+    Validate phone number format.
+    Supports Nigerian formats and general international formats (E.164).
     
     Accepts formats:
     - +2348012345678 (international format)
     - 08012345678 (local format)
     - 2348012345678 (country code without +)
+    - +15556337144 (US/International)
     
     Args:
         phone (str): Phone number to validate
@@ -88,16 +90,23 @@ def validate_phone_number(phone: str) -> bool:
     cleaned_phone = re.sub(r'[^\d+]', '', phone)
     
     # Check for valid Nigerian phone patterns
-    patterns = [
+    nigerian_patterns = [
         r'^\+234[789][01]\d{8}$',  # +234 followed by valid Nigerian mobile prefixes
         r'^234[789][01]\d{8}$',   # 234 without +
         r'^0[789][01]\d{8}$'      # Local format starting with 0
     ]
     
-    if not any(re.match(pattern, cleaned_phone) for pattern in patterns):
-        raise ValueError("Invalid Nigerian phone number format")
+    # Check for general international format (E.164ish)
+    # Must start with + and have 7-15 digits total (some countries have shorter numbers)
+    international_pattern = r'^\+\d{7,15}$'
     
-    return True
+    if any(re.match(pattern, cleaned_phone) for pattern in nigerian_patterns):
+        return True
+        
+    if re.match(international_pattern, cleaned_phone):
+        return True
+    
+    raise ValueError("Invalid phone number format. Use Nigerian format or International format (e.g. +1...)")
 
 
 def validate_email(email: str) -> bool:

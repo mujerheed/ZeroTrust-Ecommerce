@@ -1,53 +1,196 @@
-# TrustGuard: Zero Trust E-commerce System 
+# 🛡️ TrustGuard: Zero Trust E-Commerce Security System
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.118-green.svg)](https://fastapi.tiangolo.com/)
+[![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
+
+> **Zero Trust security platform for informal e-commerce in Nigeria**  
+> Securing WhatsApp & Instagram transactions with OTP authentication, encrypted receipt storage, and real-time fraud detection.
+
 ---
 
-## 🛡️ Project Overview
-This repository contains the implementation of TrustGuard, a state-of-the-art Zero Trust Security System designed to secure informal e-commerce transactions conducted over social media platforms (primarily WhatsApp and Instagram) in Nigeria. The system directly addresses critical security gaps in current workflows, ensuring that no user (buyer, vendor, or administrator) is implicitly trusted.
+## 🚀 Quick Start
 
-### Core Problems Addressed (Context: Nigeria's Informal E-commerce)
-1. **Forged Receipts**: Transactions rely on easy-to-manipulate bank transfer screenshots.
-2. **Buyer-Vendor Mistrust**: Lack of a secure, third-party verification layer for identity and payment.
-3. **Lack of Structured Access Control**: Vendors and administrators often operate without role separation, leading to data risks.
-4. **Unprotected Customer Data**: Sensitive PII is collected and stored insecurely.
+### **Prerequisites**
+- Python 3.11+
+- Node.js 18+
+- AWS Account (for deployment)
 
-### Key Project Objectives
-- Implement **OTP-based, single-use authentication** for Buyers, Vendors, and CEOs.
-- Establish a **secure, encrypted pipeline** for uploading, storing, and accessing payment receipts (Proof of Payment).
-- Enforce **Role-Based Access Control (RBAC)** via dedicated Vendor and CEO dashboards.
-- Ensure full **traceability and non-repudiation** through immutable, detailed Audit Logging of every critical action.
-- Provide a scalable, serverless architecture ready for future enhancements (e.g., AI-based fraud detection).
+### **Local Development**
 
-## 🔑 Zero Trust Pillars Implemented
-| Pillar | Implementation in TrustGuard | Security Benefit |
-|--------|------------------------------|------------------|
-| __Verify Explicitly__ | All access, regardless of location (Buyer via WhatsApp, Vendor via Web), requires fresh, time-limited OTP authentication. | Eliminates implicit trust based on network or location. |
-| __Use Least Privilege__ | AWS IAM Policies are scoped narrowly for each Lambda function. Vendor and CEO dashboards only display data relevant to their role (RBAC). | Minimizes the blast radius of a potential breach. |
-| __Assume Breach__ | All data (DynamoDB, S3 receipts) is encrypted at rest. Comprehensive AuditLogs track every user and system event. | Ensures data protection even if systems are compromised and provides forensic evidence. |
+```bash
+# Backend
+cd backend
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app --reload --port 8000
 
-## ⚙️ Technology Stack
-| Layer | Service/Framework | Purpose |
-|-------|-------------------|---------|
-| __Backend (Severless)__ | AWS Lambda (Python 3.11) | Hosts all core business logic (Auth, OTP, Auditing, S3 management). |
-| __Data Storage__ | AWS DynamoDB | Highly available, encrypted storage for Users (Buyers, Vendors, CEOs), OTPs, and AuditLogs. |
-| __Secure File Storage__ | AWS S3 (Encrypted) | Stores payment receipt images with enforced server-side encryption. |
-| __Infrastructure__ | AWS Serverless Application Model (SAM) | Infrastructure as Code (IaC) for defining and deploying all AWS resources securely. |
-| __Integration__ | AWS SNS/SES + Messaging APIs | OTP delivery via SMS/Email/WhatsApp/Instagram DMs. |
-| __Frontend/Dashboards__ | React.js | Vendor and CEO web interfaces with authenticated, role-based views. |
+# Frontend (separate terminal)
+cd frontend
+npm install
+npm run dev
+```
 
-## 📁 Project Structure
-| Directory | Purpose | Key Files |
-ZeroTrust-Ecommerce/
-│
-├── backend/                              # Backend logic root
-│   ├── app.py                          # Central router (entry point)
-│   ├── requirements.txt                # Python dependencies
-│   ├── README.md                      # Backend project overview and setup
-│
-│   ├── auth_service/                   # Module 1 - Authentication & OTP
-│   │   ├── __init__.py
-│   │   ├── auth_routes.py              # API endpoints (/auth/register, /login, /verify-otp)
-│   │   ├── auth_logic.py               # Core auth logic
-│   │   ├── otp_manager.py              # OTP generation, sending, verification
+**Access:**
+- Backend API: http://localhost:8000
+- CEO Portal: http://localhost:3000/ceo/login
+- API Docs: http://localhost:8000/docs
+
+---
+
+## 🎯 Problem & Solution
+
+### **The Problem**
+Nigeria's informal e-commerce relies on WhatsApp/Instagram for transactions, leading to:
+- ❌ **Forged bank receipts** (screenshots easily faked)
+- ❌ **Buyer-vendor mistrust** (no third-party verification)
+- ❌ **Unprotected customer data** (PII stored insecurely)
+
+### **The Solution**
+TrustGuard implements **Zero Trust principles**:
+- ✅ **Sessionless OTP authentication** (no passwords)
+- ✅ **Encrypted receipt storage** (S3 with SSE-KMS)
+- ✅ **Role-based dashboards** (Buyer/Vendor/CEO isolation)
+- ✅ **Immutable audit logging** (full traceability)
+- ✅ **Real-time fraud alerts** (auto-pop escalation modals)
+
+---
+
+## ✨ Key Features
+
+### **CEO Portal** (Admin Dashboard)
+- 📊 Dashboard with KPIs and charts
+- 👥 Vendor management (onboard, list, remove)
+- ✅ Order approvals (high-value ≥ ₦1M transactions)
+- � Analytics (vendor performance, fraud insights)
+- 🔔 Real-time notifications with auto-pop alerts
+- 🌓 Full dark/light mode support
+- 📄 CSV/PDF export
+
+### **Authentication** (Zero Trust)
+- 🔐 OTP-only (no passwords)
+- ⏱️ Single-use, 5-minute TTL
+- 👤 Role-based (Buyer, Vendor, CEO)
+- 🔑 JWT tokens with role validation
+
+### **Receipt Verification**
+- 🖼️ S3 encrypted storage
+- 🤖 Optional Textract OCR
+- 💰 Amount mismatch detection
+- 🚨 Auto-escalation for high-value orders
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+│  WhatsApp/IG    │      │   CEO Portal    │      │   Vendor Web    │
+│     (Buyer)     │      │   (Next.js 14)  │      │   (React.js)    │
+└────────┬────────┘      └────────┬────────┘      └────────┬────────┘
+         │                        │                        │
+         └────────────────────────┼────────────────────────┘
+                                  │
+                     ┌────────────▼────────────┐
+                     │   FastAPI Backend       │
+                     │   (Python 3.11)         │
+                     └────────────┬────────────┘
+                                  │
+         ┌────────────────────────┼────────────────────────┐
+         │                        │                        │
+    ┌────▼────┐            ┌──────▼──────┐         ┌──────▼──────┐
+    │DynamoDB │            │  S3 Bucket  │         │   SNS/SES   │
+    │ Tables  │            │  (Receipts) │         │  (Alerts)   │
+    └─────────┘            └─────────────┘         └─────────────┘
+```
+
+**Services:**
+- `auth_service` - OTP authentication
+- `vendor_service` - Vendor dashboard & receipt verification
+- `ceo_service` - CEO admin portal & approvals
+- `order_service` - Order management
+- `receipt_service` - S3 upload & Textract OCR
+- `integrations` - WhatsApp/Instagram webhooks
+
+---
+
+## 📚 Documentation
+
+- **[Full Documentation →](./docs/INDEX.md)**
+- **[Project Proposal →](./docs/PROJECT_PROPOSAL.md)**
+- **[Testing Guide →](./docs/TEST_NOTIFICATIONS.md)**
+- **[Meta Integration →](./docs/META_INTEGRATION_SETUP.md)**
+
+---
+
+## 🔐 Security
+
+**Zero Trust Pillars:**
+- ✅ **Verify Explicitly** - Fresh OTP for every access
+- ✅ **Least Privilege** - Scoped IAM policies, RBAC
+- ✅ **Assume Breach** - Encrypted storage, immutable audit logs
+
+**Features:**
+- No passwords (OTP-only)
+- PII masking in logs
+- HMAC webhook validation
+- Rate limiting
+- Multi-CEO tenancy isolation
+
+---
+
+## 🧪 Testing
+
+**Test Notification System:**
+```javascript
+// Browser console (CEO portal)
+const token = localStorage.getItem('token');
+fetch('http://localhost:8000/ceo/test/create-notification?notification_type=escalation', {
+  method: 'POST',
+  headers: { 'Authorization': `Bearer ${token}` }
+});
+```
+
+See [docs/TEST_NOTIFICATIONS.md](./docs/TEST_NOTIFICATIONS.md) for detailed guide.
+
+---
+
+## � Deployment
+
+```bash
+cd infrastructure/cloudformation
+sam build
+sam deploy --guided
+```
+
+**AWS Resources:**
+- 5 DynamoDB tables (encrypted at rest)
+- S3 bucket (SSE-KMS encryption)
+- 4 Lambda functions
+- Secrets Manager (JWT secret, OAuth tokens)
+- SNS topics (alerts)
+
+---
+
+## 📝 License
+
+This project is part of the **Shobhit University Minor Project** (3rd Semester).
+
+**Team**: [Your Name]  
+**Supervisor**: [Supervisor Name]  
+**Year**: 2025
+
+---
+
+## 🤝 Contributing
+
+This is an academic project. For questions or suggestions, please contact the project team.
+
+---
+
+**Last Updated**: November 22, 2025
 │   │   ├── token_manager.py            # JWT handling
 │   │   ├── database.py                 # Auth data persistence
 │   │   ├── utils.py                    # Helper utilities (formatting, validators)

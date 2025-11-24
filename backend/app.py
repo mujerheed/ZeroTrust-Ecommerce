@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 from dotenv import load_dotenv
 
@@ -8,6 +9,15 @@ if os.getenv('AWS_LAMBDA_FUNCTION_NAME') is None:
     load_dotenv()
 
 app = FastAPI()
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],  # Allow frontend origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Import routers from modules (auth, vendor, ceo, receipt, order, integrations, negotiation)
 from auth_service.auth_routes import router as auth_router
@@ -26,6 +36,10 @@ app.include_router(receipt_router, prefix="/receipts")
 app.include_router(order_router, prefix="/orders")
 app.include_router(webhook_router, prefix="/integrations")
 app.include_router(negotiation_router, prefix="/negotiations")
+
+@app.get("/")
+def root():
+    return {"message": "TrustGuard API is running"}
 
 # Lambda handler
 handler = Mangum(app)

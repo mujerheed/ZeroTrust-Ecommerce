@@ -4,11 +4,73 @@ Authentication business logic.
 from time import time
 from .database import (
     get_user, anonymize_buyer_data, log_event, get_buyer_by_id,
-    get_user_by_phone, get_user_by_email
+    get_user_by_phone, get_user_by_email, create_ceo, create_vendor
 )
 from .otp_manager import request_otp, verify_otp, generate_otp, store_otp
 from .token_manager import create_jwt
 from common.logger import logger
+
+
+def normalize_phone(phone: str) -> str:
+    """
+    Normalize Nigerian phone number to +234 format (SINGLE SOURCE OF TRUTH).
+    
+    All phone numbers stored in database MUST use +234 format.
+    This function handles all user input variations.
+    
+    Args:
+        phone: Phone number in various formats from user input
+    
+    Returns:
+        Normalized phone number with +234 prefix (always 14 characters)
+    
+    Examples:
+        "0906776624"       -> "+2349906776624"   (strip 0, add +234)
+        "09067766240"      -> "+23409067766240"  (strip 0, add +234 - even if wrong length)
+        "234906776624"     -> "+2349906776624"   (add +)
+        "+234906776624"    -> "+2349906776624"   (already correct)
+        "+234 906 776 624" -> "+2349906776624"   (remove spaces, keep format)
+        "906776624"        -> "+2349906776624"   (assume missing prefix, add +234)
+    
+    Note:
+        Storage format: ALWAYS +234XXXXXXXXXX (14 chars total)
+        User can input: 0XXX, 234XXX, +234XXX, or with spaces
+    """
+    from common.logger import logger
+    
+    # Step 1: Clean the input - remove ALL whitespace, dashes, parentheses
+    phone = phone.strip()
+    phone = phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "").replace(".", "")
+    
+    # Step 2: Normalize to +234 format
+    if phone.startswith("+234"):
+        # Already in correct format: "+234906776624"
+        normalized = phone
+    elif phone.startswith("234"):
+        # Missing +: "234906776624" -> "+234906776624"
+        normalized = "+" + phone
+    elif phone.startswith("0"):
+        # Local format: "0906776624" -> "+2349906776624"
+        # Strip the leading 0 and add +234
+        normalized = "+234" + phone[1:]
+    else:
+        # No prefix at all: "906776624" -> "+2349906776624"
+        # Assume it's the digits after country code
+        normalized = "+234" + phone
+    
+    # Step 3: Log warning if length is not 14 (expected: +234 + 10 digits)
+    if len(normalized) != 14:
+        logger.warning(
+            f"Phone normalization: unusual length after normalization. "
+            f"Input: '{phone[:4]}***', Output: '{normalized[:8]}***', Length: {len(normalized)} (expected 14)",
+            extra={
+                "input_phone": phone[:4] + "***",
+                "output_phone": normalized[:8] + "***",
+                "length": len(normalized)
+            }
+        )
+    
+    return normalized
 
 
 def register_ceo(name: str, phone: str, email: str) -> dict:
@@ -16,10 +78,32 @@ def register_ceo(name: str, phone: str, email: str) -> dict:
     Register a new CEO (self-registration).
     Returns user_id for OTP verification.
     """
-    # TODO: Create CEO in DynamoDB USERS_TABLE
+    # Generate unique CEO ID
     ceo_id = f"ceo_{int(time() * 1000)}"
-    # Mock implementation - in production, save to DynamoDB
-    return {"ceo_id": ceo_id, "status": "pending_verification"}
+    
+    # Create CEO in DynamoDB USERS_TABLE
+    create_ceo(ceo_id, name, phone, email)
+    
+    # Send OTP for verification
+    dev_otp = None
+    try:
+        otp_result = request_otp(
+            user_id=ceo_id,
+            role="CEO",
+            contact=email, # Default to email for CEO registration OTP
+            platform=None,
+            phone=phone
+        )
+        dev_otp = otp_result.get('dev_otp')
+    except Exception as e:
+        logger.error(f"Failed to send OTP during CEO registration: {e}")
+        # We still return success to avoid leaking info, but log the error
+        
+    return {
+        "ceo_id": ceo_id,
+        "status": "pending_verification",
+        "dev_otp": dev_otp
+    }
 
 
 def login_ceo(contact: str) -> str:
@@ -70,7 +154,10 @@ def login_ceo(contact: str) -> str:
             "delivery_method": result.get("delivery_method")
         })
         
-        return ceo_id
+        return {
+            "ceo_id": ceo_id,
+            "dev_otp": result.get('dev_otp')
+        }
     except Exception as e:
         logger.error(f"Failed to send CEO OTP: {e}", extra={"ceo_id": ceo_id})
         raise ValueError(f"Failed to send OTP: {str(e)}")
@@ -89,11 +176,23 @@ def login_vendor(phone: str) -> str:
     Raises:
         ValueError: If vendor not found or inactive
     """
+    # Normalize phone number to +234 format
+    normalized_phone = normalize_phone(phone)
+    
+    logger.info(
+        f"Vendor login attempt - Original: {phone[:4]}***, Normalized: {normalized_phone[:8]}***",
+        extra={"original_phone": phone[:4] + "***", "normalized_phone": normalized_phone[:8] + "***"}
+    )
+    
     # Look up vendor in database
-    vendor = get_user_by_phone(phone, role="Vendor")
+    vendor = get_user_by_phone(normalized_phone, role="Vendor")
     
     if not vendor:
-        logger.warning(f"Vendor login attempt with unknown phone: {phone[:4]}***")
+        logger.warning(
+            f"Vendor login attempt with unknown phone. "
+            f"Original: {phone[:4]}***, Normalized: {normalized_phone[:8]}*** not found in database.",
+            extra={"original_phone": phone[:4] + "***", "normalized_phone": normalized_phone[:8] + "***"}
+        )
         raise ValueError("Vendor account not found. Please contact your CEO to register.")
     
     vendor_id = vendor.get("user_id")
@@ -108,9 +207,9 @@ def login_vendor(phone: str) -> str:
         result = request_otp(
             user_id=vendor_id,
             role="Vendor",
-            contact=phone,
+            contact=normalized_phone,  # Use normalized phone for OTP delivery
             platform=None,
-            phone=phone
+            phone=normalized_phone  # Use normalized phone
         )
         
         logger.info(f"Vendor OTP sent successfully", extra={
@@ -118,7 +217,10 @@ def login_vendor(phone: str) -> str:
             "delivery_method": result.get("delivery_method")
         })
         
-        return vendor_id
+        return {
+            "vendor_id": vendor_id,
+            "dev_otp": result.get('dev_otp')
+        }
     except Exception as e:
         logger.error(f"Failed to send Vendor OTP: {e}", extra={"vendor_id": vendor_id})
         raise ValueError(f"Failed to send OTP: {str(e)}")
@@ -162,6 +264,16 @@ def verify_otp_universal(user_id: str, otp: str) -> dict:
     ceo_id = None
     if user:
         ceo_id = user.get("ceo_id")
+        
+        # Mark user as verified on first successful OTP login
+        # This applies to CEO (on registration) and Vendor (on first login)
+        if user.get("verified") == False and role in ["CEO", "Vendor"]:
+            from .database import update_user
+            update_user(user_id, {"verified": True})
+            logger.info(f"{role} marked as verified on successful OTP verification", extra={
+                "user_id": user_id,
+                "role": role
+            })
     
     logger.info(f"[DEBUG] Creating JWT token for user_id={user_id}, role={role}, ceo_id={ceo_id}")
     # Generate JWT token with ceo_id for multi-tenancy
@@ -180,9 +292,10 @@ def create_vendor_account(name: str, phone: str, email: str, created_by: str) ->
     CEO creates a vendor account.
     Returns vendor_id.
     """
-    # TODO: Create vendor in DynamoDB USERS_TABLE
+    # Create vendor in DynamoDB USERS_TABLE
     vendor_id = f"vendor_{int(time() * 1000)}"
-    # Mock implementation - in production, save to DynamoDB with created_by (ceo_id)
+    create_vendor(vendor_id, name, phone, email, created_by)
+    
     return vendor_id
 
 

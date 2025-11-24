@@ -19,3 +19,8 @@ sns_client = boto3.client(
     "sns",
     region_name=settings.AWS_REGION
 )
+
+ses_client = boto3.client(
+    "ses",
+    region_name=settings.AWS_REGION
+)

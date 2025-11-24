@@ -16,9 +16,11 @@ import {
   FormMessage,
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { toast } from "sonner"
 import Link from "next/link"
+import { AuthWrapper } from "@/components/auth-wrapper"
+import { OTPInput } from "@/components/ui/otp-input"
+import { initSession } from "@/lib/session"
 
 const signupSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
@@ -33,6 +35,7 @@ const otpSchema = z.object({
 export default function CEOSignupPage() {
   const [step, setStep] = useState<"DETAILS" | "OTP">("DETAILS")
   const [userId, setUserId] = useState("")
+  const [otpValue, setOtpValue] = useState("")
   const router = useRouter()
 
   const signupForm = useForm<z.infer<typeof signupSchema>>({
@@ -49,6 +52,7 @@ export default function CEOSignupPage() {
     defaultValues: {
       otp: "",
     },
+    mode: "onChange",
   })
 
   async function onSignupSubmit(values: z.infer<typeof signupSchema>) {
@@ -66,9 +70,17 @@ export default function CEOSignupPage() {
 
   async function onOtpSubmit(values: z.infer<typeof otpSchema>) {
     try {
+      // Use the passed value, or fall back to otpValue state
+      const otpToVerify = values.otp || otpValue
+      
+      if (!otpToVerify || otpToVerify.length !== 6) {
+        toast.error("Please enter a valid 6-character OTP")
+        return
+      }
+
       const response = await api.post("/auth/verify-otp", {
         user_id: userId,
-        otp: values.otp,
+        otp: otpToVerify,
       })
       
       const { token, role } = response.data.data
@@ -78,95 +90,116 @@ export default function CEOSignupPage() {
         return
       }
 
-      setToken(token)
+      setToken(token, 'ceo')
+      initSession('ceo') // Initialize 60-minute session timer for CEO
       toast.success("Signup successful")
       router.push("/ceo/dashboard")
     } catch (error: any) {
-      toast.error(error.response?.data?.message || "Invalid OTP or Verification Failed")
+      toast.error(error.response?.data?.detail || error.response?.data?.message || "Invalid OTP")
+    }
+  }
+
+  // Auto-submit when OTP is complete
+  const handleOtpChange = (value: string) => {
+    setOtpValue(value)
+    otpForm.setValue("otp", value, { shouldValidate: false })
+    
+    // Auto-submit when 6 characters are entered
+    if (value.length === 6) {
+      setTimeout(() => {
+        onOtpSubmit({ otp: value })
+      }, 100)
     }
   }
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-100">
-      <Card className="w-[400px]">
-        <CardHeader>
-          <CardTitle>CEO Signup</CardTitle>
-          <CardDescription>Create your TrustGuard Business Account</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {step === "DETAILS" ? (
-            <Form {...signupForm}>
-              <form onSubmit={signupForm.handleSubmit(onSignupSubmit)} className="space-y-4">
-                <FormField
-                  control={signupForm.control}
-                  name="name"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Full Name</FormLabel>
-                      <FormControl>
-                        <Input placeholder="Ada Ogunleye" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={signupForm.control}
-                  name="phone"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Phone Number</FormLabel>
-                      <FormControl>
-                        <Input placeholder="+234..." {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={signupForm.control}
-                  name="email"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Email</FormLabel>
-                      <FormControl>
-                        <Input placeholder="ada@fashion.com" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <Button type="submit" className="w-full">Sign Up</Button>
-                <div className="text-center text-sm">
-                  Already have an account? <Link href="/ceo/login" className="underline">Login</Link>
-                </div>
-              </form>
-            </Form>
-          ) : (
-            <Form {...otpForm}>
-              <form onSubmit={otpForm.handleSubmit(onOtpSubmit)} className="space-y-8">
-                <FormField
-                  control={otpForm.control}
-                  name="otp"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Enter OTP</FormLabel>
-                      <FormControl>
-                        <Input placeholder="6-character OTP" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <Button type="submit" className="w-full">Verify & Login</Button>
-                <Button variant="ghost" className="w-full" onClick={() => setStep("DETAILS")}>
-                  Back to Details
-                </Button>
-              </form>
-            </Form>
-          )}
-        </CardContent>
-      </Card>
-    </div>
+    <AuthWrapper
+      title="CEO Signup"
+      description="Create your TrustGuard Business Account"
+      backButton={
+        step === "DETAILS" 
+          ? { label: "Already have an account? Login", href: "/ceo/login" }
+          : { label: "Back to Details", onClick: () => setStep("DETAILS") }
+      }
+    >
+      {step === "DETAILS" ? (
+        <Form {...signupForm}>
+          <form onSubmit={signupForm.handleSubmit(onSignupSubmit)} className="space-y-4">
+            <FormField
+              control={signupForm.control}
+              name="name"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Full Name</FormLabel>
+                  <FormControl>
+                    <Input placeholder="John Doe" {...field} className="h-11" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={signupForm.control}
+              name="phone"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Phone Number</FormLabel>
+                  <FormControl>
+                    <Input placeholder="+234..." {...field} className="h-11" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={signupForm.control}
+              name="email"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Email Address</FormLabel>
+                  <FormControl>
+                    <Input placeholder="john@example.com" {...field} className="h-11" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <Button type="submit" className="w-full h-11" disabled={signupForm.formState.isSubmitting}>
+              {signupForm.formState.isSubmitting ? "Creating Account..." : "Create Account"}
+            </Button>
+          </form>
+        </Form>
+      ) : (
+        <Form {...otpForm}>
+          <form onSubmit={otpForm.handleSubmit(onOtpSubmit)} className="space-y-6">
+            <FormField
+              control={otpForm.control}
+              name="otp"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>One-Time Password</FormLabel>
+                  <FormControl>
+                    <div className="flex justify-center">
+                      <OTPInput
+                        length={6}
+                        value={otpValue}
+                        onChange={handleOtpChange}
+                        masked={true}
+                      />
+                    </div>
+                  </FormControl>
+                  <FormMessage className="text-center" />
+                </FormItem>
+              )}
+            />
+            <div className="space-y-2">
+              <Button type="submit" className="w-full h-11" disabled={otpForm.formState.isSubmitting}>
+                {otpForm.formState.isSubmitting ? "Verifying..." : "Verify & Complete Signup"}
+              </Button>
+            </div>
+          </form>
+        </Form>
+      )}
+    </AuthWrapper>
   )
 }

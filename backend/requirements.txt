@@ -36,3 +36,6 @@ reportlab>=4.0.0
 
 #QR code generation for order tracking
 qrcode[pil]>=7.4.0
+
+#ASGI server for running FastAPI locally
+uvicorn[standard]>=0.27.0

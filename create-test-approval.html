@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Create Test Approval Order - TrustGuard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 600px;
+            width: 100%;
+            padding: 40px;
+        }
+        h1 {
+            color: #1a202c;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        .subtitle {
+            color: #718096;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .section {
+            margin-bottom: 25px;
+        }
+        label {
+            display: block;
+            color: #2d3748;
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .token-hint {
+            font-size: 12px;
+            color: #718096;
+            margin-top: 4px;
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            display: none;
+        }
+        .result.success {
+            background: #c6f6d5;
+            color: #22543d;
+            border: 1px solid #9ae6b4;
+        }
+        .result.error {
+            background: #fed7d7;
+            color: #742a2a;
+            border: 1px solid #fc8181;
+        }
+        .instructions {
+            background: #edf2f7;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+        }
+        .instructions h3 {
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        .instructions ol {
+            margin-left: 20px;
+            color: #4a5568;
+            font-size: 14px;
+            line-height: 1.8;
+        }
+        .order-type {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .order-type button {
+            padding: 12px;
+            font-size: 14px;
+            background: white;
+            color: #4a5568;
+            border: 2px solid #e2e8f0;
+        }
+        .order-type button.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Create Test Approval Order</h1>
+        <p class="subtitle">Create a mock order with receipt for testing the Receipt Preview feature</p>
+
+        <div class="instructions">
+            <h3>📋 How to get your JWT Token:</h3>
+            <ol>
+                <li>Open browser and go to <code>http://localhost:3000/ceo/login</code></li>
+                <li>Press <code>F12</code> to open Developer Tools</li>
+                <li>Go to <strong>Application</strong> tab → <strong>Local Storage</strong> → <code>http://localhost:3000</code></li>
+                <li>Copy the value of <code>ceo_token</code></li>
+                <li>Paste it below</li>
+            </ol>
+        </div>
+
+        <div class="section">
+            <label for="token">JWT Token</label>
+            <input type="text" id="token" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
+            <div class="token-hint">Paste your JWT token from browser localStorage</div>
+        </div>
+
+        <div class="section">
+            <label>Order Type</label>
+            <div class="order-type">
+                <button type="button" class="type-btn active" data-type="high_value">
+                    💰 High-Value<br><small>(≥ ₦1,000,000)</small>
+                </button>
+                <button type="button" class="type-btn" data-type="flagged">
+                    🚨 Flagged Receipt<br><small>(Suspicious)</small>
+                </button>
+            </div>
+        </div>
+
+        <div class="section">
+            <label for="amount">Order Amount (₦)</label>
+            <input type="number" id="amount" value="1200000" min="1000" step="1000">
+            <div class="token-hint">For high-value test: ≥ 1,000,000</div>
+        </div>
+
+        <div class="section">
+            <label for="vendor">Vendor Name</label>
+            <input type="text" id="vendor" value="Test Vendor Store" placeholder="e.g., Alice's Boutique">
+        </div>
+
+        <div class="section">
+            <label for="buyer">Buyer ID</label>
+            <input type="text" id="buyer" value="wa_1234567890" placeholder="e.g., wa_1234567890">
+        </div>
+
+        <button id="createBtn" onclick="createTestOrder()">
+            🚀 Create Test Approval Order
+        </button>
+
+        <div id="result" class="result"></div>
+    </div>
+
+    <script>
+        let selectedType = 'high_value';
+
+        // Handle order type selection
+        document.querySelectorAll('.type-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                selectedType = this.dataset.type;
+                
+                // Update amount based on type
+                const amountInput = document.getElementById('amount');
+                if (selectedType === 'high_value') {
+                    amountInput.value = '1200000';
+                } else {
+                    amountInput.value = '50000';
+                }
+            });
+        });
+
+        // Auto-fill token from localStorage if available
+        window.addEventListener('load', () => {
+            const savedToken = localStorage.getItem('ceo_token');
+            if (savedToken) {
+                document.getElementById('token').value = savedToken;
+            }
+        });
+
+        async function createTestOrder() {
+            const token = document.getElementById('token').value.trim();
+            const amount = parseFloat(document.getElementById('amount').value);
+            const vendor = document.getElementById('vendor').value.trim();
+            const buyer = document.getElementById('buyer').value.trim();
+            const resultDiv = document.getElementById('result');
+            const btn = document.getElementById('createBtn');
+
+            // Validation
+            if (!token) {
+                showResult('error', '❌ Please enter your JWT token');
+                return;
+            }
+            if (!vendor || !buyer) {
+                showResult('error', '❌ Please fill in all fields');
+                return;
+            }
+            if (amount < 1000) {
+                showResult('error', '❌ Amount must be at least ₦1,000');
+                return;
+            }
+
+            // Save token for next time
+            localStorage.setItem('ceo_token', token);
+
+            btn.disabled = true;
+            btn.textContent = '⏳ Creating test order...';
+
+            try {
+                // Determine escalation reason
+                let reason = selectedType === 'high_value' ? 'HIGH_VALUE' : 'VENDOR_FLAGGED';
+                
+                const response = await fetch('http://localhost:8000/ceo/test/create-notification', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        notification_type: 'escalation',
+                        metadata: {
+                            order_id: `order_test_${Date.now()}`,
+                            vendor_id: `vendor_test_${Date.now()}`,
+                            vendor_name: vendor,
+                            buyer_id: buyer,
+                            amount: amount,
+                            reason: reason,
+                            escalation_id: `esc_test_${Date.now()}`
+                        }
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showResult('success', `
+                        ✅ Test order created successfully!<br><br>
+                        <strong>Next steps:</strong><br>
+                        1. Go to <a href="http://localhost:3000/ceo/approvals" target="_blank">Approvals page</a><br>
+                        2. You should see your test order<br>
+                        3. Click the 📄 button to test Receipt Preview<br><br>
+                        <small><strong>Note:</strong> This creates a notification. The actual order/receipt data is mocked in the backend.</small>
+                    `);
+                } else {
+                    showResult('error', `❌ Error: ${data.detail || 'Failed to create test order'}`);
+                }
+            } catch (error) {
+                showResult('error', `❌ Network error: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🚀 Create Test Approval Order';
+            }
+        }
+
+        function showResult(type, message) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.className = `result ${type}`;
+            resultDiv.innerHTML = message;
+            resultDiv.style.display = 'block';
+            
+            // Scroll to result
+            resultDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+    </script>
+</body>
+</html>

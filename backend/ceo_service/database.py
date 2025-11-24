@@ -13,6 +13,7 @@ import secrets
 import uuid
 from boto3.dynamodb.conditions import Attr, Key
 from common.config import settings
+from common.logger import logger
 from common.db_connection import dynamodb
 from typing import Dict, Any, List, Optional
 
@@ -321,27 +322,76 @@ def get_flagged_orders_for_ceo(ceo_id: str) -> List[Dict[str, Any]]:
     Returns:
         List of flagged order records
     """
+    from common.logger import logger
+    
     resp = ORDERS_TABLE.scan(
         FilterExpression=Attr('ceo_id').eq(ceo_id) & Attr('order_status').eq('flagged')
     )
-    return resp.get("Items", [])
+    
+    flagged_orders = resp.get("Items", [])
+    
+    logger.info(
+        f"Flagged orders query for CEO",
+        extra={
+            "ceo_id": ceo_id,
+            "flagged_count": len(flagged_orders)
+        }
+    )
+    
+    return flagged_orders
 
 
 def get_high_value_orders_for_ceo(ceo_id: str, threshold: float = 1000000) -> List[Dict[str, Any]]:
     """
     Retrieve high-value orders (≥ ₦1,000,000) for CEO approval.
+    Only returns orders that haven't been approved yet (excludes approved, completed, rejected, cancelled).
     
     Args:
         ceo_id: CEO identifier
         threshold: Minimum order value (default: ₦1,000,000)
     
     Returns:
-        List of high-value order records
+        List of high-value order records needing approval
     """
+    from common.logger import logger
+    
     resp = ORDERS_TABLE.scan(
         FilterExpression=Attr('ceo_id').eq(ceo_id) & Attr('total_amount').gte(threshold)
     )
-    return resp.get("Items", [])
+    
+    # Filter to only orders needing approval
+    # Exclude: 
+    # 1. Orders with these statuses: approved, completed, paid, rejected, cancelled, declined
+    # 2. Orders that have been CEO-approved (have approved_by field set)
+    orders = resp.get("Items", [])
+    excluded_statuses = {"approved", "completed", "paid", "rejected", "cancelled", "declined"}
+    
+    logger.info(
+        f"High-value orders query for CEO",
+        extra={
+            "ceo_id": ceo_id,
+            "threshold": threshold,
+            "total_high_value_orders": len(orders),
+            "order_statuses": [order.get("order_status") for order in orders]
+        }
+    )
+    
+    filtered_orders = [
+        order for order in orders 
+        if order.get("order_status") not in excluded_statuses
+        and not order.get("approved_by")  # Exclude if already CEO-approved
+    ]
+    
+    logger.info(
+        f"Filtered high-value orders needing approval",
+        extra={
+            "ceo_id": ceo_id,
+            "filtered_count": len(filtered_orders),
+            "excluded_statuses": list(excluded_statuses)
+        }
+    )
+    
+    return filtered_orders
 
 
 def get_ceo_dashboard_stats(ceo_id: str) -> Dict[str, Any]:
@@ -376,13 +426,22 @@ def get_ceo_dashboard_stats(ceo_id: str) -> Dict[str, Any]:
         status = order.get("order_status", "unknown")
         orders_by_status[status] = orders_by_status.get(status, 0) + 1
     
-    # Pending approvals (flagged + high-value pending)
+    # Pending approvals: flagged orders + high-value orders needing approval
     flagged_count = orders_by_status.get("flagged", 0)
-    high_value_pending = sum(
+    
+    # Count high-value orders that need approval:
+    # - Not in excluded statuses (approved/completed/paid/rejected/cancelled/declined)
+    # - Not already CEO-approved (no approved_by field)
+    # - Flagged orders are counted separately above, so we exclude them here to avoid double-counting
+    excluded_statuses = {"approved", "completed", "paid", "rejected", "cancelled", "declined", "flagged"}
+    high_value_needing_approval = sum(
         1 for order in all_orders 
-        if order.get("total_amount", 0) >= 1000000 and order.get("order_status") == "pending"
+        if order.get("total_amount", 0) >= 1000000 
+        and order.get("order_status") not in excluded_statuses
+        and not order.get("approved_by")  # Exclude if already CEO-approved
     )
-    pending_approvals = flagged_count + high_value_pending
+    
+    pending_approvals = flagged_count + high_value_needing_approval
     
     # Get vendor count
     vendors = get_all_vendors_for_ceo(ceo_id)
@@ -528,6 +587,7 @@ def save_chatbot_config(
 ) -> Dict[str, Any]:
     """
     Save or update chatbot configuration for CEO.
+    Stores chatbot settings in the CEO's user record.
     
     Args:
         ceo_id: CEO identifier
@@ -538,24 +598,38 @@ def save_chatbot_config(
     Returns:
         Updated config record
     """
-    config_record = {
-        "ceo_id": ceo_id,
+    chatbot_config = {
         "greeting": greeting or "Welcome to our business! How can I help you today?",
         "tone": tone or "friendly and professional",
         "updated_at": int(time.time()),
     }
     
     # Add any additional settings
-    config_record.update(additional_settings)
+    chatbot_config.update(additional_settings)
     
-    CEO_CONFIG_TABLE.put_item(Item=config_record)
-    return config_record
+    # Store in CEO's user record under 'chatbot_settings' attribute
+    try:
+        USERS_TABLE.update_item(
+            Key={"user_id": ceo_id},
+            UpdateExpression="SET chatbot_settings = :config",
+            ExpressionAttributeValues={":config": chatbot_config}
+        )
+        logger.info(f"Chatbot settings saved for CEO {ceo_id}")
+    except Exception as e:
+        logger.error(f"Failed to save chatbot settings for CEO {ceo_id}: {e}")
+        raise
+    
+    return {
+        "ceo_id": ceo_id,
+        **chatbot_config
+    }
 
 
 def get_chatbot_config(ceo_id: str) -> Dict[str, Any]:
     """
     Retrieve chatbot configuration for CEO.
     Returns default config if not customized.
+    Reads from CEO's user record.
     
     Args:
         ceo_id: CEO identifier
@@ -563,10 +637,23 @@ def get_chatbot_config(ceo_id: str) -> Dict[str, Any]:
     Returns:
         Chatbot config with greeting, tone, etc.
     """
-    resp = CEO_CONFIG_TABLE.get_item(Key={"ceo_id": ceo_id})
-    
-    if resp.get("Item"):
-        return resp["Item"]
+    try:
+        # Get CEO's user record
+        resp = USERS_TABLE.get_item(Key={"user_id": ceo_id})
+        
+        if resp.get("Item"):
+            ceo_record = resp["Item"]
+            # Check if chatbot_settings exists
+            if "chatbot_settings" in ceo_record:
+                config = ceo_record["chatbot_settings"]
+                # Add ceo_id to response
+                return {
+                    "ceo_id": ceo_id,
+                    **config
+                }
+    except Exception as e:
+        # Error fetching from database - return defaults
+        logger.warning(f"Failed to fetch chatbot config from user record, using defaults: {e}")
     
     # Return default configuration
     return {
@@ -575,3 +662,155 @@ def get_chatbot_config(ceo_id: str) -> Dict[str, Any]:
         "tone": "friendly and professional",
         "updated_at": None,
     }
+
+
+# ==================== NOTIFICATIONS ====================
+
+def create_notification(
+    ceo_id: str,
+    notification_type: str,
+    title: str,
+    message: str,
+    order_id: Optional[str] = None,
+    vendor_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Create a notification for a CEO.
+    
+    Args:
+        ceo_id: CEO identifier
+        notification_type: Type of notification (escalation, alert, info, warning)
+        title: Notification title
+        message: Notification message
+        order_id: Optional order ID reference
+        vendor_id: Optional vendor ID reference
+        metadata: Optional additional metadata
+    
+    Returns:
+        Created notification record
+    """
+    notification_id = f"notif_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+    timestamp = int(time.time())
+    
+    notification = {
+        "notification_id": notification_id,
+        "ceo_id": ceo_id,
+        "type": notification_type,
+        "title": title,
+        "message": message,
+        "order_id": order_id,
+        "vendor_id": vendor_id,
+        "metadata": metadata or {},
+        "read": False,
+        "timestamp": timestamp,
+        "created_at": timestamp,
+        "ttl": timestamp + (30 * 24 * 60 * 60)  # Auto-delete after 30 days
+    }
+    
+    # Store in USERS_TABLE with composite key (notifications are user-scoped)
+    # For production, consider a dedicated Notifications table with GSI
+    try:
+        USERS_TABLE.put_item(Item={
+            "user_id": notification_id,  # PK
+            "ceo_id": ceo_id,  # For querying
+            **notification
+        })
+        logger.info(f"Notification created: {notification_id} for CEO {ceo_id}")
+    except Exception as e:
+        logger.error(f"Failed to create notification: {e}")
+        raise
+    
+    return notification
+
+
+def get_notifications_for_ceo(
+    ceo_id: str,
+    limit: int = 20,
+    unread_only: bool = False
+) -> List[Dict[str, Any]]:
+    """
+    Get notifications for a CEO, sorted by timestamp (newest first).
+    
+    Args:
+        ceo_id: CEO identifier
+        limit: Maximum number of notifications to return
+        unread_only: If True, return only unread notifications
+    
+    Returns:
+        List of notification records
+    """
+    try:
+        # Scan for notifications (for production, use GSI on ceo_id)
+        filter_expression = Attr("ceo_id").eq(ceo_id) & Attr("notification_id").exists()
+        
+        if unread_only:
+            filter_expression = filter_expression & Attr("read").eq(False)
+        
+        response = USERS_TABLE.scan(
+            FilterExpression=filter_expression,
+            Limit=limit * 2  # Fetch extra to account for filtering
+        )
+        
+        notifications = response.get("Items", [])
+        
+        # Sort by timestamp (newest first)
+        notifications.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        
+        # Return limited results
+        return notifications[:limit]
+    
+    except Exception as e:
+        logger.error(f"Failed to fetch notifications for CEO {ceo_id}: {e}")
+        return []
+
+
+def mark_notification_as_read(notification_id: str) -> bool:
+    """
+    Mark a notification as read.
+    
+    Args:
+        notification_id: Notification identifier
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        USERS_TABLE.update_item(
+            Key={"user_id": notification_id},
+            UpdateExpression="SET #read = :true",
+            ExpressionAttributeNames={"#read": "read"},
+            ExpressionAttributeValues={":true": True}
+        )
+        logger.info(f"Notification marked as read: {notification_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to mark notification as read: {e}")
+        return False
+
+
+def mark_all_notifications_as_read(ceo_id: str) -> int:
+    """
+    Mark all notifications for a CEO as read.
+    
+    Args:
+        ceo_id: CEO identifier
+    
+    Returns:
+        Number of notifications marked as read
+    """
+    try:
+        # Get all unread notifications
+        notifications = get_notifications_for_ceo(ceo_id, limit=100, unread_only=True)
+        
+        count = 0
+        for notif in notifications:
+            if mark_notification_as_read(notif["notification_id"]):
+                count += 1
+        
+        logger.info(f"Marked {count} notifications as read for CEO {ceo_id}")
+        return count
+    
+    except Exception as e:
+        logger.error(f"Failed to mark all notifications as read: {e}")
+        return 0
