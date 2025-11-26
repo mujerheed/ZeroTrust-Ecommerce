@@ -292,30 +292,57 @@ def _deliver_otp_buyer(
     Returns:
         str: Delivery method used ('whatsapp', 'instagram', or 'sms')
     """
-    # TODO: Implement actual Meta API integration
-    # For now, simulate delivery
+    import asyncio
+    from integrations.whatsapp_api import whatsapp_api
+    from integrations.instagram_api import instagram_api
     
     try:
         if platform == 'whatsapp':
-            # TODO: Call WhatsApp Business API
-            logger.warning(f"💬 [DEV-WHATSAPP] To: {user_id} | OTP: {otp}")
-            if settings.ENVIRONMENT == "dev":
-                print(f"\n[DEV-WHATSAPP] To: {user_id} | OTP: {otp}\n")
-            return 'whatsapp'
+            # Use real WhatsApp Business API
+            logger.info(f"📱 Sending OTP via WhatsApp to {user_id}")
+            
+            # Call async send_otp method
+            result = asyncio.run(whatsapp_api.send_otp(
+                to=user_id,  # Will handle wa_ prefix removal
+                otp=otp,
+                expires_minutes=5
+            ))
+            
+            if result.get('success'):
+                logger.info(f"✅ WhatsApp OTP delivered successfully to {user_id}")
+                return 'whatsapp'
+            else:
+                logger.warning(f"⚠️ WhatsApp delivery failed: {result.get('error')}, trying SMS fallback")
+                raise Exception(f"WhatsApp delivery failed: {result.get('error')}")
+                
         elif platform == 'instagram':
-            # TODO: Call Instagram Messaging API
-            logger.warning(f"📷 [DEV-INSTAGRAM] To: {user_id} | OTP: {otp}")
-            if settings.ENVIRONMENT == "dev":
-                print(f"\n[DEV-INSTAGRAM] To: {user_id} | OTP: {otp}\n")
-            return 'instagram'
+            # Use real Instagram Messaging API
+            logger.info(f"📸 Sending OTP via Instagram to {user_id}")
+            
+            # Call async send_otp method
+            result = asyncio.run(instagram_api.send_otp(
+                to=user_id,  # Will handle ig_ prefix removal
+                otp=otp,
+                expires_minutes=5
+            ))
+            
+            if result.get('success'):
+                logger.info(f"✅ Instagram OTP delivered successfully to {user_id}")
+                return 'instagram'
+            else:
+                logger.warning(f"⚠️ Instagram delivery failed: {result.get('error')}, trying SMS fallback")
+                raise Exception(f"Instagram delivery failed: {result.get('error')}")
+                
     except Exception as e:
         logger.warning(f"Platform delivery failed for {user_id}: {str(e)}, falling back to SMS")
     
     # Fallback to SMS if platform delivery fails or phone is available
     if phone:
         try:
+            logger.info(f"📞 Attempting SMS fallback to {phone[-4:]}****")
             message = f"Your TrustGuard verification code is: {otp}. Do not share this code with anyone."
             _send_sms(phone, message)
+            logger.info(f"✅ SMS fallback successful to {phone[-4:]}****")
             return 'sms'
         except Exception as e:
             logger.error(f"SMS fallback failed for {user_id}: {str(e)}")

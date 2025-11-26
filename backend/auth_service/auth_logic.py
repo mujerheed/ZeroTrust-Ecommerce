@@ -18,6 +18,10 @@ def normalize_phone(phone: str) -> str:
     All phone numbers stored in database MUST use +234 format.
     This function handles all user input variations.
     
+    **Meta Sandbox Support:**
+    - Maps +15556337144 (Meta test number) ↔ +2348155563371 (Nigerian test)
+    - Bidirectional: works for both registration and lookups
+    
     Args:
         phone: Phone number in various formats from user input
     
@@ -31,16 +35,37 @@ def normalize_phone(phone: str) -> str:
         "+234906776624"    -> "+2349906776624"   (already correct)
         "+234 906 776 624" -> "+2349906776624"   (remove spaces, keep format)
         "906776624"        -> "+2349906776624"   (assume missing prefix, add +234)
+        "+15556337144"     -> "+2348155563371"   (Meta sandbox → Nigerian test)
+        "+2348155563371"   -> "+2348155563371"   (Nigerian test → stored as-is)
     
     Note:
         Storage format: ALWAYS +234XXXXXXXXXX (14 chars total)
         User can input: 0XXX, 234XXX, +234XXX, or with spaces
+        Meta sandbox numbers are automatically mapped for testing
     """
     from common.logger import logger
+    
+    # META SANDBOX MAPPING (for testing with Meta's test credentials)
+    # Bidirectional mapping: Meta sandbox ↔ Nigerian test number
+    META_SANDBOX_MAPPING = {
+        "+15556337144": "+2348155563371",  # Meta sandbox → Nigerian test
+        "15556337144": "+2348155563371",   # Without + prefix
+        "+2348155563371": "+2348155563371", # Nigerian test → keep as-is
+        "2348155563371": "+2348155563371",  # Without + prefix
+    }
     
     # Step 1: Clean the input - remove ALL whitespace, dashes, parentheses
     phone = phone.strip()
     phone = phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "").replace(".", "")
+    
+    # Step 1.5: Check Meta sandbox mapping FIRST (before normalization)
+    if phone in META_SANDBOX_MAPPING:
+        mapped = META_SANDBOX_MAPPING[phone]
+        logger.info(
+            f"📱 Meta sandbox mapping applied: {phone} → {mapped}",
+            extra={"original": phone, "mapped": mapped}
+        )
+        return mapped
     
     # Step 2: Normalize to +234 format
     if phone.startswith("+234"):
