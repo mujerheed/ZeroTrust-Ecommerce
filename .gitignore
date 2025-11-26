@@ -64,3 +64,22 @@ secrets.json
 # Logs
 logs/
 *.log
+# Build artifacts
+deployment/
+deployment-backend/
+*.tar.gz
+backend/lambda-deployment.zip
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs
+*.log
