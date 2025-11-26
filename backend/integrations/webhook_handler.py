@@ -10,43 +10,64 @@ Security Features:
 - Request replay attack prevention
 - Multi-CEO tenancy support
 
-Webhook Flow:
-1. Meta sends POST with X-Hub-Signature-256 header
-2. Verify HMAC signature using Meta App Secret
-3. Parse message payload
-4. Route to appropriate handler (buyer registration, OTP, order check)
-5. Send response via platform API
+Webhook Handler for Meta (WhatsApp & Instagram)
 
-Meta Setup:
-- WhatsApp Business API: https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks
-- Instagram Messaging API: https://developers.facebook.com/docs/messenger-platform/webhooks
+Processes incoming webhooks from Meta's Graph API for:
+- WhatsApp Business messages
+- Instagram Direct messages
+
+Features:
+- Signature verification (HMAC-SHA256)
+- Replay attack prevention (timestamp + message ID deduplication)
+- IP allowlisting (Meta's official webhook servers)
+- Multi-platform message parsing
+- CEO ID extraction for multi-tenancy
 """
 
 import hashlib
 import hmac
 import json
+import time
 from typing import Dict, Any, Optional
 from fastapi import Request, HTTPException
 from common.logger import logger
 from common.config import settings
+from integrations.message_cache import is_message_processed, mark_message_processed
+
+
+# Meta's official webhook server IP ranges (as of 2024)
+# Source: https://developers.facebook.com/docs/graph-api/webhooks/getting-started#ip-allowlisting
+META_WEBHOOK_IPS = [
+    "173.252.88.0/21",    # Facebook IP range 1
+    "173.252.96.0/19",    # Facebook IP range 2
+    "69.63.176.0/20",     # Facebook IP range 3
+    "69.171.224.0/19",    # Facebook IP range 4
+    "31.13.24.0/21",      # Facebook IP range 5
+    "31.13.64.0/18",      # Facebook IP range 6
+]
 
 
 async def verify_meta_signature(request: Request, app_secret: str) -> bool:
     """
-    Verify HMAC signature from Meta webhook.
+    Verify HMAC signature from Meta webhook with replay attack prevention.
     
     Meta sends webhooks with X-Hub-Signature-256 header:
     sha256=<HMAC-SHA256 of body using app secret>
+    
+    Security Features:
+    - HMAC-SHA256 signature validation
+    - Timestamp validation (5-minute window)
+    - Message ID deduplication
     
     Args:
         request: FastAPI request object
         app_secret: Meta App Secret for HMAC verification
     
     Returns:
-        bool: True if signature is valid
+        bool: True if signature is valid and request is fresh
     
     Raises:
-        HTTPException: If signature is invalid or missing
+        HTTPException: If signature is invalid, missing, or request is too old
     """
     signature_header = request.headers.get('X-Hub-Signature-256')
     
@@ -76,6 +97,95 @@ async def verify_meta_signature(request: Request, app_secret: str) -> bool:
         raise HTTPException(status_code=403, detail="Invalid signature")
     
     logger.info("Webhook signature verified successfully")
+    
+    # ========== REPLAY ATTACK PREVENTION ==========
+    
+    # 1. Timestamp Validation (prevent replay of old requests)
+    import time as time_module
+    current_time = int(time_module.time())
+    
+    # Check for timestamp in headers (if Meta provides it)
+    timestamp_header = request.headers.get('X-Hub-Timestamp')
+    if timestamp_header:
+        try:
+            request_timestamp = int(timestamp_header)
+            age_seconds = current_time - request_timestamp
+            
+            # Reject requests older than 5 minutes (300 seconds)
+            if age_seconds > 300:
+                logger.warning(
+                    f"Webhook request too old: {age_seconds}s (max 300s)",
+                    extra={'age_seconds': age_seconds, 'timestamp': request_timestamp}
+                )
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Request too old ({age_seconds}s). Possible replay attack."
+                )
+            
+            # Reject requests from the future (clock skew > 60s)
+            if age_seconds < -60:
+                logger.warning(
+                    f"Webhook request from future: {age_seconds}s",
+                    extra={'age_seconds': age_seconds, 'timestamp': request_timestamp}
+                )
+                raise HTTPException(
+                    status_code=401,
+                    detail="Request timestamp in future. Clock skew detected."
+                )
+            
+            logger.debug(f"Timestamp validation passed: {age_seconds}s old")
+        
+        except ValueError:
+            logger.warning(f"Invalid timestamp header: {timestamp_header}")
+    
+    # 2. Message ID Deduplication (prevent duplicate processing)
+    # Parse body to extract message ID
+    try:
+        import json as json_module
+        payload = json_module.loads(body.decode('utf-8'))
+        
+        # Extract message ID from payload (varies by platform)
+        message_id = None
+        
+        # WhatsApp format
+        if payload.get('object') == 'whatsapp_business_account':
+            entries = payload.get('entry', [])
+            if entries:
+                changes = entries[0].get('changes', [])
+                if changes:
+                    messages = changes[0].get('value', {}).get('messages', [])
+                    if messages:
+                        message_id = messages[0].get('id')
+        
+        # Instagram format
+        elif payload.get('object') == 'instagram':
+            entries = payload.get('entry', [])
+            if entries:
+                messaging = entries[0].get('messaging', [])
+                if messaging:
+                    message_id = messaging[0].get('message', {}).get('mid')
+        
+        # Check if we've seen this message before
+        if message_id:
+            if is_message_processed(message_id):
+                logger.warning(
+                    f"Duplicate message detected: {message_id}",
+                    extra={'message_id': message_id}
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail="Duplicate message. Already processed."
+                )
+            
+            # Mark message as processed (with 10-minute TTL)
+            mark_message_processed(message_id, ttl_seconds=600)
+            logger.debug(f"Message ID tracked: {message_id}")
+    
+    except json_module.JSONDecodeError:
+        logger.warning("Could not parse webhook body for message ID")
+    except Exception as e:
+        logger.warning(f"Error in message deduplication: {str(e)}")
+    
     return True
 
 

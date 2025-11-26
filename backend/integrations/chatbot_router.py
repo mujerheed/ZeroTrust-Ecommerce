@@ -434,7 +434,7 @@ class ChatbotRouter:
         Handle OTP verification.
         
         Args:
-            sender_id: Buyer ID
+            sender_id: Buyer ID (may be PSID-based for Instagram)
             otp: OTP code to verify
             platform: 'whatsapp' or 'instagram'
             ceo_id: CEO ID
@@ -442,14 +442,32 @@ class ChatbotRouter:
         Returns:
             Dict with verification result
         """
+        from integrations.conversation_state import conversation_state
+        
         try:
-            # Verify OTP
-            is_valid = verify_otp(sender_id, otp, 'Buyer')
+            # For Instagram, get phone-based buyer_id from conversation state
+            buyer_id_for_verification = sender_id
+            
+            if platform == 'instagram' and sender_id.startswith('ig_'):
+                # Check if this is PSID-based (not starting with 234)
+                psid_part = sender_id.replace('ig_', '')
+                if not psid_part.startswith('234'):
+                    # This is PSID-based, get phone-based ID from conversation state
+                    state = conversation_state.get_state(sender_id)
+                    if state and 'phone_based_buyer_id' in state.get('context', {}):
+                        buyer_id_for_verification = state['context']['phone_based_buyer_id']
+                        logger.info(
+                            f"Instagram OTP verification: Using phone-based ID {buyer_id_for_verification} "
+                            f"for PSID {sender_id}"
+                        )
+            
+            # Verify OTP with correct buyer_id
+            is_valid = verify_otp(buyer_id_for_verification, otp, 'Buyer')
             
             if is_valid:
-                logger.info(f"OTP verified for buyer: {sender_id}")
+                logger.info(f"OTP verified for buyer: {buyer_id_for_verification}")
                 
-                # Send success message
+                # Send success message to original sender_id (for Instagram API)
                 success_msg = """✅ Verification Successful!
 
 Your account is now active! 🎉
@@ -468,13 +486,14 @@ Type 'help' to see all commands"""
                 
                 return {
                     'action': 'verified',
-                    'buyer_id': sender_id,
+                    'buyer_id': buyer_id_for_verification,  # Return phone-based ID
+                    'original_sender_id': sender_id,         # Also return original
                     'platform': platform,
                     'valid': True
                 }
             
             else:
-                logger.warning(f"Invalid OTP attempt for buyer: {sender_id}")
+                logger.warning(f"Invalid OTP attempt for buyer: {buyer_id_for_verification}")
                 
                 # Send error message
                 error_msg = """❌ Invalid Verification Code
@@ -493,7 +512,7 @@ Type 'register' to request a new code"""
                 
                 return {
                     'action': 'verification_failed',
-                    'buyer_id': sender_id,
+                    'buyer_id': buyer_id_for_verification,
                     'platform': platform,
                     'valid': False
                 }
@@ -859,37 +878,59 @@ Type 'help' for other commands"""
             name = context.get('name', 'Customer')
             address = context.get('address', '')
             
-            # Create buyer record
+            # Normalize phone to get consistent format
+            from auth_service.auth_logic import normalize_phone
+            normalized_phone = normalize_phone(phone)
+            
+            # Create phone-based buyer_id for Instagram (consistent with WhatsApp)
+            # Format: ig_234XXXXXXXXXX (using phone instead of PSID)
+            phone_digits = normalized_phone.replace('+', '')  # Remove + prefix
+            phone_based_buyer_id = f"ig_{phone_digits}"
+            
+            # Extract original PSID from sender_id (format: ig_1234567890)
+            original_psid = sender_id.replace('ig_', '') if sender_id.startswith('ig_') else sender_id
+            
+            # Create buyer record with phone-based ID
             create_buyer(
-                buyer_id=sender_id,
-                phone=phone,
+                buyer_id=phone_based_buyer_id,  # NEW: ig_234XXXXXXXXXX format
+                phone=normalized_phone,
                 platform=platform,
                 ceo_id=ceo_id,
                 name=name,
                 delivery_address=address,
                 email=None,
-                meta={}
+                meta={
+                    'instagram_psid': original_psid,  # Store original PSID for reference
+                    'original_sender_id': sender_id   # Store original sender_id
+                }
             )
             
             # Generate OTP
             otp = generate_otp('Buyer')
-            store_otp(sender_id, otp, 'Buyer')
+            store_otp(phone_based_buyer_id, otp, 'Buyer')  # Use phone-based ID for OTP
             
-            # Send OTP
+            # Send OTP to original sender_id (PSID-based for Instagram API)
             await self.instagram.send_otp(sender_id, otp)
             
-            # Update state to waiting for OTP
+            # Update state with phone-based buyer_id
             conversation_state.update_state(
-                buyer_id=sender_id,
+                buyer_id=sender_id,  # Keep using PSID for conversation state
                 new_state='waiting_for_otp',
-                context_updates={'phone': phone}
+                context_updates={
+                    'phone': normalized_phone,
+                    'phone_based_buyer_id': phone_based_buyer_id  # Store for later reference
+                }
             )
             
-            logger.info(f"Buyer created (Instagram): {sender_id}, OTP sent")
+            logger.info(
+                f"Buyer created (Instagram): Phone-based ID: {phone_based_buyer_id}, "
+                f"Original PSID: {original_psid}, OTP sent"
+            )
             
             return {
                 'action': 'otp_sent',
-                'buyer_id': sender_id,
+                'buyer_id': phone_based_buyer_id,  # Return phone-based ID
+                'original_sender_id': sender_id,    # Also return original for reference
                 'platform': platform,
                 'next_state': 'waiting_for_otp'
             }

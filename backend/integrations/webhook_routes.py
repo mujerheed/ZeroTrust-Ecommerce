@@ -70,14 +70,34 @@ async def whatsapp_webhook_receive(request: Request):
     parses message, and routes to chatbot handler.
     
     Security:
+        - IP allowlisting (Meta's official webhook servers)
         - Validates HMAC signature (X-Hub-Signature-256)
+        - Replay attack prevention (timestamp + message ID deduplication)
         - Uses Meta App Secret from Secrets Manager
     
     Returns:
         200 OK to acknowledge receipt (Meta expects this within 20 seconds)
     """
     try:
-        # Get Meta App Secret for signature verification
+        # 1. IP Allowlisting (optional but recommended for production)
+        from .ip_allowlist import get_client_ip, is_ip_allowed
+        from .webhook_handler import META_WEBHOOK_IPS
+        
+        client_ip = get_client_ip(request)
+        
+        # Skip IP check in dev mode or if IP is unknown (local testing)
+        if settings.ENVIRONMENT == "production" and client_ip != "unknown":
+            if not is_ip_allowed(client_ip, META_WEBHOOK_IPS):
+                logger.warning(
+                    f"Webhook request from unauthorized IP: {client_ip}",
+                    extra={'client_ip': client_ip}
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail="Unauthorized IP address"
+                )
+        
+        # 2. Get Meta App Secret for signature verification
         secrets = await get_meta_secrets()
         app_secret = secrets.get('APP_SECRET')
         
@@ -86,7 +106,7 @@ async def whatsapp_webhook_receive(request: Request):
             # Still return 200 to Meta to avoid retries, but don't process
             return JSONResponse(content={"status": "error", "message": "Configuration error"}, status_code=200)
         
-        # Verify HMAC signature
+        # 3. Verify HMAC signature + replay attack prevention
         await verify_meta_signature(request, app_secret)
         
         # Parse request body
