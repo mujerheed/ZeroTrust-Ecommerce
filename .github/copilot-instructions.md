@@ -1,3 +1,41 @@
+# TrustGuard AI Agent Instructions
+
+This guide enables AI coding agents to be immediately productive in the TrustGuard (ZeroTrust-Ecommerce) repo. It covers architecture, workflows, conventions, and integration points unique to this project.
+## System Overview
+
+TrustGuard is a Zero Trust security platform for informal e-commerce (Nigeria focus). It secures buyer-vendor interactions on WhatsApp/Instagram, prevents forged receipts, and protects PII. Key actors: Buyer (chat/receipt upload), Vendor (dashboard/order/receipt review), CEO (admin, onboarding, approvals).
+## Quick Start & Entrypoints
+
+- Main FastAPI app: `backend/app.py`
+  - Local run: `pip install -r backend/requirements.txt && uvicorn backend.app:app --reload --port 8000`
+## Architecture & Data Flow
+
+- Modular backend: `auth_service/`, `vendor_service/`, `ceo_service/` (each has routes, logic, database helpers)
+...
+## Repo Conventions & Patterns
+
+- API responses: always use `format_response(status, message, data)` (see `*_service/utils.py`)
+...
+## Patterns & Gotchas
+
+- Two rate-limit helpers: `backend/common/security.rate_limit` (FastAPI Request) and `rate_limit_check` (signature varies, not always present)
+...
+## Developer Workflows
+
+- Unit tests: `backend/*/tests/` (run: `cd backend && pytest -q`)
+...
+## Deployment & Infra
+
+- AWS SAM: see `infrastructure/cloudformation/trustguard-template.yaml`, deploy with `infrastructure/scripts/deploy.sh`
+...
+## Key Files & Examples
+
+- Add/modify endpoint: `backend/*_service/*_routes.py`, `*_logic.py`, `database.py`
+...
+## Before Large Changes, Always Ask:
+
+- Target environment: local, AWS dev, or CI?
+...
 ## Purpose
 
 This file gives an AI coding agent exactly what it needs to be productive in the TrustGuard (ZeroTrust-Ecommerce) repo: the high-level architecture, common patterns, how to run and test locally, and where to look for implementation examples.

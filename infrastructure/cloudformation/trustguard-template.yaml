@@ -37,7 +37,7 @@ Globals:
         ENVIRONMENT: !Ref Environment
         STACK_NAME: !Ref AWS::StackName
         META_SECRET_NAME: !Sub "/TrustGuard/${Environment}/meta-${AWS::StackName}"
-        META_WEBHOOK_VERIFY_TOKEN: "trustguard_verify_2025"
+        META_WEBHOOK_VERIFY_TOKEN: "test_trustgu@rd_25"
   Api:
     # Disable AWS_IAM authorization - we handle JWT authentication in Lambda
     Auth:

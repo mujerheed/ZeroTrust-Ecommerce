@@ -13,6 +13,8 @@ import boto3
 import json
 import argparse
 from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
 
 # Configuration
 REGION = 'us-east-1'
@@ -107,7 +109,7 @@ def verify_webhook_configuration():
             "https://p9yc4gwt9a.execute-api.us-east-1.amazonaws.com/Prod/integrations/webhook/whatsapp",
             params={
                 "hub.mode": "subscribe",
-                "hub.verify_token": "trustguard_verify_2025",
+                "hub.verify_token": "test_trusgu@rd_25",
                 "hub.challenge": "12345"
             },
             timeout=10
@@ -126,7 +128,7 @@ def verify_webhook_configuration():
             "https://p9yc4gwt9a.execute-api.us-east-1.amazonaws.com/Prod/integrations/webhook/instagram",
             params={
                 "hub.mode": "subscribe",
-                "hub.verify_token": "trustguard_verify_2025",
+                "hub.verify_token": "test_trusgu@rd_25",
                 "hub.challenge": "54321"
             },
             timeout=10
