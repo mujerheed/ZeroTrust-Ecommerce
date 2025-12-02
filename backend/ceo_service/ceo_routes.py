@@ -1102,10 +1102,94 @@ class OAuthCallbackResponse(BaseModel):
     state: str
 
 
+# Temporary OAuth session storage (in production, use Redis)
+_oauth_sessions: Dict[str, Dict[str, Any]] = {}
+
+
+@router.post("/oauth/meta/create-session")
+async def create_oauth_session_endpoint(
+    platform: str = Query(..., description="Platform to connect: 'whatsapp' or 'instagram'"),
+    ceo_id: str = Depends(get_current_ceo)
+):
+    """
+    Create a temporary OAuth session token for secure browser redirects.
+    
+    This endpoint creates a short-lived, single-use token that can be used
+    in the OAuth authorization URL without exposing the main JWT token.
+    
+    **Query Parameters:**
+    - `platform`: 'whatsapp' or 'instagram'
+    
+    **Returns:**
+    - Temporary session token and authorization URL
+    
+    **Example:**
+    ```
+    POST /ceo/oauth/meta/create-session?platform=whatsapp
+    Authorization: Bearer <JWT_TOKEN>
+    
+    Response:
+    {
+      "status": "success",
+      "data": {
+        "session_token": "abc123...",
+        "auth_url": "http://localhost:8000/ceo/oauth/meta/authorize?platform=whatsapp&session=abc123...",
+        "expires_in": 300
+      }
+    }
+    ```
+    """
+    try:
+        import secrets
+        
+        # Generate temporary session token
+        session_token = secrets.token_urlsafe(32)
+        
+        # Store session data (expires in 5 minutes)
+        _oauth_sessions[session_token] = {
+            "ceo_id": ceo_id,
+            "platform": platform,
+            "created_at": int(time.time()),
+            "expires_at": int(time.time()) + 300,  # 5 minutes
+            "used": False
+        }
+        
+        # Build authorization URL with session token
+        auth_url = f"{os.getenv('OAUTH_CALLBACK_BASE_URL', 'http://localhost:8000')}/ceo/oauth/meta/authorize?platform={platform}&session={session_token}"
+        
+        logger.info("OAuth session created", extra={
+            "ceo_id": ceo_id,
+            "platform": platform,
+            "session_token": session_token[:8] + "..."
+        })
+        
+        return format_response(
+            "success",
+            "OAuth session created",
+            {
+                "session_token": session_token,
+                "auth_url": auth_url,
+                "expires_in": 300
+            }
+        )
+    
+    except Exception as e:
+        logger.error("Failed to create OAuth session", extra={
+            "ceo_id": ceo_id,
+            "platform": platform,
+            "error": str(e)
+        })
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create OAuth session"
+        )
+
+
 @router.get("/oauth/meta/authorize")
 async def oauth_authorize_endpoint(
     platform: str = Query(..., description="Platform to connect: 'whatsapp' or 'instagram'"),
-    ceo_id: str = Depends(get_current_ceo)
+    session: Optional[str] = Query(None, description="Temporary OAuth session token"),
+    ceo_id: Optional[str] = None
 ):
     """
     Initiate Meta OAuth flow.
@@ -1114,17 +1198,67 @@ async def oauth_authorize_endpoint(
     
     **Query Parameters:**
     - `platform`: 'whatsapp' or 'instagram'
+    - `session`: Temporary session token (if not using Authorization header)
     
     **Returns:**
     - Redirect to Meta OAuth authorization URL
     
     **Example:**
     ```
-    GET /ceo/oauth/meta/authorize?platform=whatsapp
-    Authorization: Bearer <JWT_TOKEN>
+    GET /ceo/oauth/meta/authorize?platform=whatsapp&session=abc123...
     ```
     """
     try:
+        # Validate session token if provided
+        if session:
+            session_data = _oauth_sessions.get(session)
+            
+            if not session_data:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid session token"
+                )
+            
+            # Check if expired
+            if int(time.time()) > session_data["expires_at"]:
+                _oauth_sessions.pop(session, None)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session token expired"
+                )
+            
+            # Check if already used
+            if session_data["used"]:
+                _oauth_sessions.pop(session, None)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session token already used"
+                )
+            
+            # Verify platform matches
+            if session_data["platform"] != platform:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Platform mismatch"
+                )
+            
+            # Mark as used and get CEO ID
+            session_data["used"] = True
+            ceo_id = session_data["ceo_id"]
+            
+            logger.info("OAuth session validated", extra={
+                "ceo_id": ceo_id,
+                "platform": platform,
+                "session_token": session[:8] + "..."
+            })
+        else:
+            # Fall back to JWT authentication
+            if not ceo_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication required"
+                )
+        
         # Build redirect URI (your application's callback URL)
         from fastapi import Request
         # In production, use configured callback URL from environment
@@ -1141,6 +1275,8 @@ async def oauth_authorize_endpoint(
         # Redirect to Meta OAuth consent screen
         return RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
     
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -1150,6 +1286,7 @@ async def oauth_authorize_endpoint(
             "error": str(e)
         })
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to initiate OAuth")
+
 
 
 @router.get("/oauth/meta/callback")

@@ -17,7 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { 
+import {
   ArrowLeft,
   Plug,
   CheckCircle2,
@@ -86,21 +86,17 @@ export default function IntegrationsPage() {
 
   const handleConnect = async (platform: string) => {
     try {
-      // Redirect to OAuth authorization endpoint
-      const authUrl = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/ceo/oauth/meta/authorize?platform=${platform}`;
-      
-      // Get token from localStorage
-      const token = localStorage.getItem("ceo_token");
-      if (!token) {
-        toast.error("Please log in again");
-        router.push("/ceo/login");
-        return;
-      }
+      // Create a temporary OAuth session
+      // This generates a short-lived, single-use token that's safe to use in URLs
+      const response = await api.post(`/ceo/oauth/meta/create-session?platform=${platform}`);
 
-      // Open OAuth flow in current window
-      window.location.href = `${authUrl}&token=${encodeURIComponent(token)}`;
+      const { auth_url } = response.data.data;
+
+      // Redirect to the authorization URL
+      // The URL contains a temporary session token instead of the JWT
+      window.location.href = auth_url;
     } catch (error: any) {
-      toast.error(`Failed to connect ${platform}`);
+      toast.error(error.response?.data?.detail || `Failed to connect ${platform}`);
       console.error(error);
     }
   };
@@ -119,7 +115,7 @@ export default function IntegrationsPage() {
     try {
       await api.post(`/ceo/oauth/meta/revoke?platform=${platformToDisconnect}`);
       toast.success(`${platformToDisconnect === "whatsapp" ? "WhatsApp" : "Instagram"} disconnected successfully`);
-      
+
       // Refresh status
       await fetchConnectionStatus();
     } catch (error: any) {
@@ -310,89 +306,89 @@ export default function IntegrationsPage() {
         {/* Info Alert */}
         <Alert>
           <AlertTriangle className="h-4 w-4" />
-        <AlertDescription>
-          <strong>Multi-Tenancy Support:</strong> Each CEO business operates independently. Your OAuth tokens are securely stored and isolated from other businesses. Connections enable automated buyer authentication and order notifications via WhatsApp/Instagram DMs.
-        </AlertDescription>
-      </Alert>
+          <AlertDescription>
+            <strong>Multi-Tenancy Support:</strong> Each CEO business operates independently. Your OAuth tokens are securely stored and isolated from other businesses. Connections enable automated buyer authentication and order notifications via WhatsApp/Instagram DMs.
+          </AlertDescription>
+        </Alert>
 
-      {/* Connection Cards */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* WhatsApp Business */}
-        {renderConnectionCard(
-          "WhatsApp Business",
-          "Enable buyer OTP delivery and automated order notifications via WhatsApp",
-          whatsappStatus,
-          <MessageCircle className="h-6 w-6 text-green-600" />,
-          "whatsapp"
-        )}
+        {/* Connection Cards */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* WhatsApp Business */}
+          {renderConnectionCard(
+            "WhatsApp Business",
+            "Enable buyer OTP delivery and automated order notifications via WhatsApp",
+            whatsappStatus,
+            <MessageCircle className="h-6 w-6 text-green-600" />,
+            "whatsapp"
+          )}
 
-        {/* Instagram Business */}
-        {renderConnectionCard(
-          "Instagram Business",
-          "Enable buyer discovery and authentication via Instagram DMs",
-          instagramStatus,
-          <InstagramIcon className="h-6 w-6 text-pink-600" />,
-          "instagram"
-        )}
-      </div>
+          {/* Instagram Business */}
+          {renderConnectionCard(
+            "Instagram Business",
+            "Enable buyer discovery and authentication via Instagram DMs",
+            instagramStatus,
+            <InstagramIcon className="h-6 w-6 text-pink-600" />,
+            "instagram"
+          )}
+        </div>
 
-      {/* OAuth Information */}
-      <Card>
-        <CardHeader>
-          <CardTitle>About OAuth Connections</CardTitle>
-          <CardDescription>
-            How Meta OAuth integration works with TrustGuard
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          <div>
-            <h4 className="font-semibold mb-1">🔒 Security</h4>
-            <p className="text-muted-foreground">
-              OAuth tokens are encrypted and stored in AWS Secrets Manager. Each CEO's tokens are isolated and never shared with other businesses.
-            </p>
-          </div>
-          <div>
-            <h4 className="font-semibold mb-1">⏱️ Token Expiry</h4>
-            <p className="text-muted-foreground">
-              Meta access tokens expire after 60 days. You'll be notified when tokens need refresh (less than 7 days remaining). Simply reconnect to refresh.
-            </p>
-          </div>
-          <div>
-            <h4 className="font-semibold mb-1">📱 Required Permissions</h4>
-            <p className="text-muted-foreground">
-              <strong>WhatsApp:</strong> Business management, messaging, account management<br />
-              <strong>Instagram:</strong> Basic profile, manage messages, pages messaging
-            </p>
-          </div>
-          <div>
-            <h4 className="font-semibold mb-1">🔌 Disconnecting</h4>
-            <p className="text-muted-foreground">
-              Disconnecting removes stored tokens and disables automated messaging. Your order and buyer data remains intact.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
+        {/* OAuth Information */}
+        <Card>
+          <CardHeader>
+            <CardTitle>About OAuth Connections</CardTitle>
+            <CardDescription>
+              How Meta OAuth integration works with TrustGuard
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <div>
+              <h4 className="font-semibold mb-1">🔒 Security</h4>
+              <p className="text-muted-foreground">
+                OAuth tokens are encrypted and stored in AWS Secrets Manager. Each CEO's tokens are isolated and never shared with other businesses.
+              </p>
+            </div>
+            <div>
+              <h4 className="font-semibold mb-1">⏱️ Token Expiry</h4>
+              <p className="text-muted-foreground">
+                Meta access tokens expire after 60 days. You'll be notified when tokens need refresh (less than 7 days remaining). Simply reconnect to refresh.
+              </p>
+            </div>
+            <div>
+              <h4 className="font-semibold mb-1">📱 Required Permissions</h4>
+              <p className="text-muted-foreground">
+                <strong>WhatsApp:</strong> Business management, messaging, account management<br />
+                <strong>Instagram:</strong> Basic profile, manage messages, pages messaging
+              </p>
+            </div>
+            <div>
+              <h4 className="font-semibold mb-1">🔌 Disconnecting</h4>
+              <p className="text-muted-foreground">
+                Disconnecting removes stored tokens and disables automated messaging. Your order and buyer data remains intact.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
 
-      {/* Disconnect Confirmation Dialog */}
-      <Dialog open={showDisconnectDialog} onOpenChange={setShowDisconnectDialog}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Disconnect {platformToDisconnect === "whatsapp" ? "WhatsApp" : "Instagram"}?</DialogTitle>
-            <DialogDescription>
-              This will remove your OAuth connection and disable automated messaging on {platformToDisconnect === "whatsapp" ? "WhatsApp" : "Instagram"}. 
-              Your order history and buyer data will not be affected.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowDisconnectDialog(false)}>
-              Cancel
-            </Button>
-            <Button variant="destructive" onClick={handleDisconnect}>
-              Disconnect
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        {/* Disconnect Confirmation Dialog */}
+        <Dialog open={showDisconnectDialog} onOpenChange={setShowDisconnectDialog}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Disconnect {platformToDisconnect === "whatsapp" ? "WhatsApp" : "Instagram"}?</DialogTitle>
+              <DialogDescription>
+                This will remove your OAuth connection and disable automated messaging on {platformToDisconnect === "whatsapp" ? "WhatsApp" : "Instagram"}.
+                Your order history and buyer data will not be affected.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowDisconnectDialog(false)}>
+                Cancel
+              </Button>
+              <Button variant="destructive" onClick={handleDisconnect}>
+                Disconnect
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </CEOLayout>
   );

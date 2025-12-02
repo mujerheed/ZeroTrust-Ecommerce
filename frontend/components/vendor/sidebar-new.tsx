@@ -13,6 +13,7 @@ import {
   Users,
   ChevronLeft,
   ChevronRight,
+  Shield,
 } from "lucide-react"
 
 interface NavItem {
@@ -30,8 +31,8 @@ interface VendorSidebarProps {
   onToggle?: () => void
 }
 
-export function VendorSidebar({ 
-  pendingReceipts = 0, 
+export function VendorSidebar({
+  pendingReceipts = 0,
   unreadMessages = 0,
   className,
   collapsed = false,
@@ -73,13 +74,22 @@ export function VendorSidebar({
       {/* Logo/Brand */}
       <div className="p-6 flex items-center justify-between">
         {!collapsed && (
-          <div>
-            <h2 className="text-2xl font-bold text-primary">TrustGuard</h2>
-            <p className="text-sm text-muted-foreground">Vendor Portal</p>
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-primary/10 rounded-lg">
+              <Shield className="h-6 w-6 text-primary" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-primary">TrustGuard</h2>
+              <p className="text-sm text-muted-foreground">Vendor Portal</p>
+            </div>
           </div>
         )}
         {collapsed && (
-          <h2 className="text-2xl font-bold text-primary mx-auto">TG</h2>
+          <div className="flex flex-col items-center gap-2">
+            <div className="p-2 bg-primary/10 rounded-lg">
+              <Shield className="h-6 w-6 text-primary" />
+            </div>
+          </div>
         )}
         {onToggle && (
           <Button

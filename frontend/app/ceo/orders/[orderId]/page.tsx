@@ -8,14 +8,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
 import { toast } from "sonner"
-import { 
-  ArrowLeft, 
-  Package, 
-  User, 
-  Calendar, 
-  DollarSign, 
-  MapPin, 
-  Phone, 
+import {
+  ArrowLeft,
+  Package,
+  User,
+  Calendar,
+  DollarSign,
+  MapPin,
+  Phone,
   Mail,
   FileText,
   AlertTriangle,
@@ -78,13 +78,13 @@ export default function OrderDetailPage() {
     try {
       // For now, we'll get the order from the orders list
       // In production, you'd have a dedicated endpoint GET /ceo/orders/{orderId}
-      const response = await api.get("/ceo/orders", { 
-        params: { search: orderId } 
+      const response = await api.get("/ceo/orders", {
+        params: { search: orderId }
       })
-      
+
       const orders = response.data.data.orders || []
       const foundOrder = orders.find((o: any) => o.order_id === orderId)
-      
+
       if (foundOrder) {
         setOrder(foundOrder)
       } else {
@@ -119,7 +119,7 @@ export default function OrderDetailPage() {
           <AlertTriangle className="h-12 w-12 text-red-500 mx-auto" />
           <p className="text-lg font-semibold">Order not found</p>
           <Link href="/ceo/orders">
-            <Button>Back to Orders</Button>
+            <Button variant="outline">Back to Orders</Button>
           </Link>
         </div>
       </div>
@@ -185,9 +185,9 @@ export default function OrderDetailPage() {
                     Created
                   </p>
                   <p className="text-sm font-medium">
-                    {new Date(order.created_at).toLocaleDateString('en-US', { 
-                      year: 'numeric', 
-                      month: 'long', 
+                    {new Date(order.created_at).toLocaleDateString('en-US', {
+                      year: 'numeric',
+                      month: 'long',
                       day: 'numeric',
                       hour: '2-digit',
                       minute: '2-digit'
@@ -201,9 +201,9 @@ export default function OrderDetailPage() {
                       Updated
                     </p>
                     <p className="text-sm font-medium">
-                      {new Date(order.updated_at).toLocaleDateString('en-US', { 
-                        year: 'numeric', 
-                        month: 'short', 
+                      {new Date(order.updated_at).toLocaleDateString('en-US', {
+                        year: 'numeric',
+                        month: 'short',
                         day: 'numeric',
                         hour: '2-digit',
                         minute: '2-digit'
