@@ -24,3 +24,16 @@ ses_client = boto3.client(
     "ses",
     region_name=settings.AWS_REGION
 )
+
+
+def get_dynamodb_table(table_name: str):
+    """
+    Get a DynamoDB table resource by name.
+    
+    Args:
+        table_name: Name of the DynamoDB table
+    
+    Returns:
+        boto3 DynamoDB Table resource
+    """
+    return dynamodb.Table(table_name)

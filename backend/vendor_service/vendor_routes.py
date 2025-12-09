@@ -14,6 +14,7 @@ from .vendor_logic import (
 from .preferences import save_vendor_preferences, get_vendor_preferences
 from common.analytics import get_vendor_orders_by_day
 from .utils import format_response, verify_vendor_token
+from common.logger import logger
 
 router = APIRouter()
 security = HTTPBearer()
@@ -25,6 +26,16 @@ def get_current_vendor(token: str = Depends(security)) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return vendor_id
 
+
+# ========== REQUEST MODELS ==========
+
+class VendorChatSendRequest(BaseModel):
+    """Request model for sending messages to buyers."""
+    buyer_id: str
+    message: str
+    order_id: Optional[str] = None
+
+
 # ========== VENDOR DASHBOARD ==========
 @router.get("/dashboard")
 async def get_dashboard(vendor_id: str = Depends(get_current_vendor)):
@@ -34,6 +45,89 @@ async def get_dashboard(vendor_id: str = Depends(get_current_vendor)):
         return format_response("success", "Dashboard data retrieved", dashboard_data)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ========== VENDOR CHAT RELAY ==========
+@router.post("/chat/send")
+async def send_message_to_buyer(
+    req: VendorChatSendRequest,
+    vendor_id: str = Depends(get_current_vendor)
+):
+    """
+    Send message to buyer via WhatsApp or Instagram.
+    
+    This is the main endpoint for vendor-to-buyer communication.
+    
+    Body:
+        - buyer_id: Buyer ID (wa_... or ig_...)
+        - message: Message text (max 500 chars)
+        - order_id: Optional order ID for context
+    
+    Returns:
+        {
+            "message_id": "wamid.xxx",
+            "platform": "whatsapp" | "instagram",
+            "status": "sent",
+            "sent_at": 1733654400
+        }
+    """
+    try:
+        from .database import get_vendor
+        from .chat_logic import (
+            send_vendor_message_to_buyer,
+            validate_buyer_belongs_to_ceo,
+            save_vendor_message_to_audit
+        )
+        
+        # Get vendor details
+        vendor = get_vendor(vendor_id)
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+        
+        ceo_id = vendor.get("ceo_id")
+        vendor_name = vendor.get("name", "Vendor")
+        
+        if not ceo_id:
+            raise HTTPException(status_code=400, detail="Vendor missing ceo_id")
+        
+        # Validate buyer belongs to same CEO
+        if not validate_buyer_belongs_to_ceo(req.buyer_id, ceo_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied: Buyer does not belong to your business"
+            )
+        
+        # Send message
+        result = await send_vendor_message_to_buyer(
+            vendor_id=vendor_id,
+            buyer_id=req.buyer_id,
+            message=req.message,
+            ceo_id=ceo_id,
+            order_id=req.order_id,
+            vendor_name=vendor_name
+        )
+        
+        # Save to audit log
+        save_vendor_message_to_audit(
+            vendor_id=vendor_id,
+            buyer_id=req.buyer_id,
+            message=req.message,
+            order_id=req.order_id,
+            ceo_id=ceo_id,
+            platform=result.get("platform"),
+            message_id=result.get("message_id")
+        )
+        
+        return format_response("success", "Message sent successfully", result)
+    
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to send vendor message: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to send message: {str(e)}")
+
 
 # ========== ORDER MANAGEMENT ==========
 @router.get("/orders")
@@ -574,9 +668,9 @@ async def send_chat_message(
         }
     """
     try:
-        from .database import get_order_by_id
+        from .database import get_order_by_id, get_vendor
+        from .chat_logic import send_vendor_message_to_buyer, save_vendor_message_to_audit
         import time
-        import uuid
         
         # Verify order belongs to this vendor
         order = get_order_by_id(order_id)
@@ -587,60 +681,77 @@ async def send_chat_message(
             raise HTTPException(status_code=403, detail="Access denied: Order does not belong to you")
         
         buyer_id = order.get("buyer_id")
-        platform = "whatsapp" if buyer_id.startswith("wa_") else "instagram"
+        ceo_id = order.get("ceo_id")
+        
+        if not buyer_id or not ceo_id:
+            raise HTTPException(status_code=400, detail="Order missing buyer_id or ceo_id")
+        
+        # Get vendor details for name attribution
+        vendor = get_vendor(vendor_id)
+        vendor_name = vendor.get("name", "Vendor") if vendor else "Vendor"
         
         # Build message text
         message_text = req.message
         
         # Handle quick actions
         if req.quick_action == "confirm_price":
-            amount = order.get("amount", 0)
+            amount = order.get("total_amount", 0)
             message_text = f"✅ Price confirmed: ₦{amount:,.2f}\n\nPlease proceed with payment to the account details provided."
         
         elif req.quick_action == "send_payment_details":
-            # Get vendor's bank details (would come from vendor profile)
+            # Get vendor's bank details from vendor profile
+            bank_name = vendor.get("bank_name", "Access Bank") if vendor else "Access Bank"
+            account_number = vendor.get("account_number", "0123456789") if vendor else "0123456789"
+            account_name = vendor.get("account_name", vendor_name) if vendor else vendor_name
+            
             message_text = (
-                "💳 *Payment Details*\n\n"
-                "Bank: Access Bank\n"
-                "Account: 0123456789\n"
-                "Name: Ada's Fashion\n"
-                f"Amount: ₦{order.get('amount', 0):,.2f}\n"
+                f"💳 *Payment Details*\n\n"
+                f"Bank: {bank_name}\n"
+                f"Account: {account_number}\n"
+                f"Name: {account_name}\n"
+                f"Amount: ₦{order.get('total_amount', 0):,.2f}\n"
                 f"Reference: {order_id}\n\n"
                 "Please send payment receipt after transfer."
             )
         
         elif req.quick_action == "request_receipt":
-            message_text = "📸 Please upload your payment receipt to complete this order. Click the button below to upload."
+            message_text = "📸 Please upload your payment receipt to complete this order. You can send it directly in this chat."
         
-        # TODO: Send message via Meta API (WhatsApp/Instagram)
-        # For now, log it
-        message_id = f"msg_{uuid.uuid4().hex[:12]}"
-        sent_at = int(time.time())
+        # Send message via Meta API
+        result = await send_vendor_message_to_buyer(
+            vendor_id=vendor_id,
+            buyer_id=buyer_id,
+            message=message_text,
+            ceo_id=ceo_id,
+            order_id=order_id,
+            vendor_name=vendor_name
+        )
         
-        from common.logger import logger
-        logger.info(
-            f"Vendor message sent",
-            extra={
-                "vendor_id": vendor_id,
-                "order_id": order_id,
-                "buyer_id": buyer_id,
-                "platform": platform,
-                "message_id": message_id,
-                "quick_action": req.quick_action
-            }
+        # Save to audit log
+        save_vendor_message_to_audit(
+            vendor_id=vendor_id,
+            buyer_id=buyer_id,
+            message=message_text,
+            order_id=order_id,
+            ceo_id=ceo_id,
+            platform=result.get("platform"),
+            message_id=result.get("message_id")
         )
         
         return format_response("success", "Message sent to buyer", {
-            "message_id": message_id,
-            "sent_at": sent_at,
-            "delivery_status": "sent",
-            "platform": platform,
+            "message_id": result.get("message_id"),
+            "sent_at": result.get("sent_at"),
+            "delivery_status": result.get("status"),
+            "platform": result.get("platform"),
             "quick_action_applied": req.quick_action
         })
     
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.error(f"Failed to send message: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to send message: {str(e)}")
 
 

@@ -333,6 +333,19 @@ def verify_receipt(vendor_id: str, order_id: str, verification_status: str, note
         "notes": notes or "No notes provided"
     })
     
+    # Generate and send PDF confirmation if verified
+    if verification_status == "verified":
+        try:
+            import asyncio
+            from order_service.pdf_uploader import generate_and_send_pdf
+            
+            # Run PDF generation asynchronously
+            asyncio.create_task(generate_and_send_pdf(order_id))
+            logger.info(f"PDF generation initiated for order {order_id}")
+        except Exception as e:
+            logger.error(f"Failed to initiate PDF generation: {str(e)}")
+            # Don't fail the verification if PDF generation fails
+    
     return {
         "order_id": order_id,
         "new_status": new_status,

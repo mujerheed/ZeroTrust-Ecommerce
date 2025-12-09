@@ -83,3 +83,7 @@ __pycache__/
 
 # Logs
 *.log
+
+# Auto-generated webhook configs
+docs/WEBHOOK_CONFIG.md
+docs/webhook_config.json

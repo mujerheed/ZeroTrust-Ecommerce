@@ -42,6 +42,9 @@ class ChatbotRouter:
         'confirm_order': r'(?i)^(?:confirm|accept|yes|ok)(?:\s+(\S+))?$',  # confirm or confirm ord_123
         'cancel_order': r'(?i)^(?:cancel|reject|no)(?:\s+(\S+))?$',  # cancel or cancel ord_123
         'order_status': r'(?i)^(?:order|status)\s+(\S+)$',
+        'negotiate': r'(?i)^negotiate\s+(\S+)\s+(\d+(?:\.\d{1,2})?)$',  # negotiate ord_123 450000
+        'accept_counter': r'(?i)^accept\s+(?:counter|offer)(?:\s+(\S+))?$',  # accept counter neg_123
+        'reject_counter': r'(?i)^reject\s+(?:counter|offer)(?:\s+(\S+))?$',  # reject counter neg_123
         'upload': r'(?i)^(?:upload|receipt)$',
         'update_address': r'(?i)^(?:address|update address|my address)$',
         'help': r'(?i)^(?:help|\?)$'
@@ -297,6 +300,16 @@ class ChatbotRouter:
         elif intent == 'update_address':
             return await self.handle_address_update(sender_id, platform, ceo_id, text)
         
+        elif intent == 'negotiate':
+            # value is tuple: (order_id, amount)
+            return await self.handle_negotiation_request(sender_id, value, platform, ceo_id)
+        
+        elif intent == 'accept_counter':
+            return await self.handle_negotiation_response(sender_id, 'accept', value, platform, ceo_id)
+        
+        elif intent == 'reject_counter':
+            return await self.handle_negotiation_response(sender_id, 'reject', value, platform, ceo_id)
+        
         elif intent == 'help':
             return await self.handle_help(sender_id, platform, ceo_id)
         
@@ -340,21 +353,31 @@ class ChatbotRouter:
             existing_buyer = get_buyer_by_id(sender_id)
             
             if existing_buyer:
-                # Buyer already registered - just send OTP
+                # Buyer already registered - send personalized welcome back message
                 logger.info(f"Existing buyer: {sender_id}")
                 
-                # Generate new OTP
-                otp = generate_otp('Buyer')
-                store_otp(sender_id, otp, 'Buyer')
+                # Get CEO business name
+                from ceo_service.database import get_ceo_by_id
+                ceo = get_ceo_by_id(ceo_id)
+                business_name = ceo.get('company_name', 'TrustGuard') if ceo else 'TrustGuard'
+                buyer_name = existing_buyer.get('name', 'there')
                 
-                # Send OTP
+                # Send welcome back message
+                welcome_back = f"""Hi {buyer_name}! 👋
+
+Welcome back to {business_name}! 🛡️
+
+How can we help you today?
+
+Type 'help' to see available commands."""
+                
                 if platform == 'whatsapp':
-                    await self.whatsapp.send_otp(sender_id, otp)
+                    await self.whatsapp.send_message(sender_id, welcome_back)
                 else:
-                    await self.instagram.send_otp(sender_id, otp)
+                    await self.instagram.send_message(sender_id, welcome_back)
                 
                 return {
-                    'action': 'otp_sent',
+                    'action': 'welcome_back',
                     'buyer_id': sender_id,
                     'is_new': False,
                     'platform': platform
@@ -367,8 +390,13 @@ class ChatbotRouter:
                 # Get sender name from message (if available)
                 sender_name = parsed_message.get('sender_name', 'there')
                 
-                # Get customized welcome message
-                default_welcome = f"Hi {sender_name}! 👋\n\nWelcome to TrustGuard! 🛡️\n\nLet's get you set up."
+                # Get CEO business name for personalized welcome
+                from ceo_service.database import get_ceo_by_id
+                ceo = get_ceo_by_id(ceo_id)
+                business_name = ceo.get('company_name', 'TrustGuard') if ceo else 'TrustGuard'
+                
+                # Create personalized welcome message
+                default_welcome = f"Hi {sender_name}! 👋\n\nWelcome to {business_name}! 🛡️\n\nWe're here to make your online shopping safe and secure.\n\nLet's get you set up."
                 welcome_message = self.get_customized_response(
                     ceo_id=ceo_id,
                     response_type='welcome',
@@ -1489,34 +1517,33 @@ Thank you for choosing TrustGuard! 🛍️"""
 
 Available Commands:
 
-📝 *register* or *start*
-   Create new account
+📝 Registration & Account
+• *register* - Create new account
+• *verify <code>* - Verify OTP
 
-🔐 *verify <code>*
-   Verify your OTP code
+📦 Orders
+• *order <order_id>* - Check order status
+• *confirm* - Confirm pending order
+• *cancel <order_id>* - Cancel order
 
-📍 *address*
-   Update delivery address
+💰 Negotiation
+• *negotiate <order_id> <amount>* - Request price negotiation
+• *accept counter* - Accept vendor's counter-offer
+• *reject counter* - Reject vendor's counter-offer
 
-✅ *confirm*
-   Confirm your pending order
+📸 Receipts
+• *upload* - Receipt upload instructions
+• [Send photo] - Upload receipt directly
 
-❌ *cancel*
-   Cancel your pending order
+📍 Address
+• *address* - Update delivery address
 
-📦 *order <order_id>*
-   Check order status
-
-📸 *upload*
-   Receipt upload instructions
-
-❓ *help*
-   Show this message
+❓ Help
+• *help* - Show this message
 
 ---
 
 Need more help?
-Just message us anytime! We're here to assist. 💬
 
 TrustGuard - Your Shopping Security Partner"""
             
@@ -1922,6 +1949,334 @@ Or just ask your question! 💬"""
             'action': 'unknown_intent',
             'platform': platform,
             'text': text
+        }
+    
+    async def handle_negotiation_request(
+        self,
+        sender_id: str,
+        value: str,
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle buyer initiating price negotiation.
+        
+        Args:
+            sender_id: Buyer ID
+            value: Regex match value (order_id, amount)
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with negotiation result
+        """
+        try:
+            # Parse value - it's a string from regex, need to re-extract
+            import re
+            text = f"negotiate {value}"  # Reconstruct for parsing
+            match = re.match(r'(?i)^negotiate\s+(\S+)\s+(\d+(?:\.\d{1,2})?)$', text)
+            
+            if not match:
+                msg = "❌ Invalid format. Use: *negotiate <order_id> <amount>*\n\nExample: negotiate ord_123 450000"
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, msg)
+                else:
+                    await self.instagram.send_message(sender_id, msg)
+                return {'action': 'invalid_format', 'platform': platform}
+            
+            order_id = match.group(1)
+            proposed_amount = float(match.group(2))
+            
+            # Get order details
+            from order_service.database import get_order_by_id
+            order = get_order_by_id(order_id)
+            
+            if not order:
+                msg = f"❌ Order not found: {order_id}\n\nPlease check the order ID and try again."
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, msg)
+                else:
+                    await self.instagram.send_message(sender_id, msg)
+                return {'action': 'order_not_found', 'order_id': order_id, 'platform': platform}
+            
+            # Verify buyer owns this order
+            if order.get('buyer_id') != sender_id:
+                msg = "🔒 You can only negotiate on your own orders."
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, msg)
+                else:
+                    await self.instagram.send_message(sender_id, msg)
+                return {'action': 'unauthorized', 'platform': platform}
+            
+            # Create negotiation
+            from negotiation_service import negotiation_logic
+            
+            # Convert order to negotiation items
+            items = order.get('items', [])
+            negotiation_items = []
+            for item in items:
+                negotiation_items.append({
+                    'name': item.get('name', 'Item'),
+                    'quantity': int(item.get('quantity', 1)),
+                    'description': item.get('description')
+                })
+            
+            # Create negotiation request
+            negotiation = await negotiation_logic.request_quote(
+                buyer_id=sender_id,
+                vendor_id=order.get('vendor_id'),
+                ceo_id=ceo_id,
+                items=negotiation_items,
+                delivery_address=None,
+                notes=f"Buyer counter-offer for order {order_id}: ₦{proposed_amount:,.2f}"
+            )
+            
+            # Add buyer's counter-offer
+            await negotiation_logic.buyer_counter_offer(
+                negotiation_id=negotiation['negotiation_id'],
+                buyer_id=sender_id,
+                counter_total=proposed_amount,
+                notes=f"Negotiating from ₦{order.get('total_amount', 0):,.2f} to ₦{proposed_amount:,.2f}"
+            )
+            
+            # Send confirmation to buyer
+            original_amount = order.get('total_amount', 0)
+            currency_symbol = "₦"
+            
+            msg = f"""💬 *Negotiation Request Sent*
+
+Order: {order_id}
+Original Price: {currency_symbol}{original_amount:,.2f}
+Your Offer: {currency_symbol}{proposed_amount:,.2f}
+
+The vendor will review your offer.
+You'll be notified when they respond.
+
+Type 'help' for other commands."""
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            logger.info(f"Negotiation created: {negotiation['negotiation_id']} for order {order_id}")
+            
+            return {
+                'action': 'negotiation_created',
+                'negotiation_id': negotiation['negotiation_id'],
+                'order_id': order_id,
+                'proposed_amount': proposed_amount,
+                'platform': platform
+            }
+        
+        except Exception as e:
+            logger.error(f"Negotiation request failed: {str(e)}", exc_info=True)
+            
+            msg = f"❌ Failed to create negotiation: {str(e)}\n\nPlease try again or contact support."
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            return {'action': 'error', 'error': str(e), 'platform': platform}
+    
+    async def handle_negotiation_response(
+        self,
+        sender_id: str,
+        action: str,
+        value: Optional[str],
+        platform: str,
+        ceo_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle buyer accepting or rejecting vendor's counter-offer.
+        
+        Args:
+            sender_id: Buyer ID
+            action: 'accept' or 'reject'
+            value: Optional negotiation ID
+            platform: 'whatsapp' or 'instagram'
+            ceo_id: CEO ID
+        
+        Returns:
+            Dict with response result
+        """
+        try:
+            # Get buyer's most recent negotiation if no ID provided
+            from negotiation_service.database import list_negotiations_by_buyer
+            
+            negotiations = list_negotiations_by_buyer(sender_id, status='counter_offer')
+            
+            if not negotiations:
+                msg = "❌ No pending counter-offers found.\n\nType 'help' for available commands."
+                if platform == 'whatsapp':
+                    await self.whatsapp.send_message(sender_id, msg)
+                else:
+                    await self.instagram.send_message(sender_id, msg)
+                return {'action': 'no_pending_negotiations', 'platform': platform}
+            
+            # Get most recent negotiation
+            negotiation = negotiations[0]
+            negotiation_id = negotiation.get('negotiation_id')
+            
+            if action == 'accept':
+                # Accept the counter-offer
+                from negotiation_service import negotiation_logic
+                
+                updated = await negotiation_logic.accept_negotiation(
+                    negotiation_id=negotiation_id,
+                    user_id=sender_id,
+                    final_amount=negotiation.get('counter_total')
+                )
+                
+                final_amount = updated.get('final_amount', 0)
+                currency_symbol = "₦"
+                
+                msg = f"""✅ *Negotiation Accepted!*
+
+Final Price: {currency_symbol}{final_amount:,.2f}
+
+The order has been updated with the new price.
+Proceed with payment at the agreed amount.
+
+Type 'help' for other commands."""
+                
+                logger.info(f"Negotiation {negotiation_id} accepted by buyer {sender_id}")
+                
+            else:  # reject
+                # Reject the counter-offer
+                from negotiation_service import negotiation_logic
+                
+                await negotiation_logic.reject_negotiation(
+                    negotiation_id=negotiation_id,
+                    user_id=sender_id,
+                    reason="Buyer rejected vendor's counter-offer"
+                )
+                
+                msg = f"""❌ *Counter-Offer Rejected*
+
+You have declined the vendor's offer.
+
+You can:
+• Contact the vendor directly
+• Make a new offer
+• Proceed with the original price
+
+Type 'help' for other commands."""
+                
+                logger.info(f"Negotiation {negotiation_id} rejected by buyer {sender_id}")
+            
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            return {
+                'action': f'negotiation_{action}ed',
+                'negotiation_id': negotiation_id,
+                'platform': platform
+            }
+        
+        except Exception as e:
+            logger.error(f"Negotiation response failed: {str(e)}", exc_info=True)
+            
+            msg = f"❌ Failed to process response: {str(e)}\n\nPlease try again or contact support."
+            if platform == 'whatsapp':
+                await self.whatsapp.send_message(sender_id, msg)
+            else:
+                await self.instagram.send_message(sender_id, msg)
+            
+            return {'action': 'error', 'error': str(e), 'platform': platform}
+
+
+async def send_pdf_confirmation(
+    buyer_id: str,
+    order_id: str,
+    download_url: str,
+    ceo_id: str
+) -> Dict[str, Any]:
+    """
+    Send PDF order confirmation download link to buyer.
+    
+    Args:
+        buyer_id: Buyer ID (wa_... or ig_...)
+        order_id: Order ID
+        download_url: Pre-signed S3 download URL
+        ceo_id: CEO ID
+    
+    Returns:
+        Dict with delivery status
+    """
+    try:
+        from order_service.database import get_order_by_id
+        
+        # Get order details for total amount
+        order = get_order_by_id(order_id)
+        total_amount = order.get("total_amount", 0) if order else 0
+        
+        # Format message
+        message = f"""✅ *Order Confirmed!*
+
+Your order has been approved and is being processed.
+
+📄 *Download your order confirmation:*
+{download_url}
+
+⏰ This link expires in 24 hours.
+
+Order ID: {order_id}
+Total: ₦{total_amount:,.2f}
+
+Thank you for using TrustGuard! 🛡️"""
+        
+        # Determine platform
+        if buyer_id.startswith("wa_"):
+            platform = "whatsapp"
+            phone_number = buyer_id[3:]
+            
+            # Get WhatsApp API
+            from integrations.secrets_helper import get_meta_secrets
+            meta_secrets = get_meta_secrets(ceo_id)
+            whatsapp_token = meta_secrets.get("WHATSAPP_ACCESS_TOKEN")
+            whatsapp_phone_id = meta_secrets.get("WHATSAPP_PHONE_NUMBER_ID")
+            
+            if whatsapp_token and whatsapp_phone_id:
+                from integrations.whatsapp_api import WhatsAppAPI
+                whatsapp = WhatsAppAPI(whatsapp_token, whatsapp_phone_id)
+                await whatsapp.send_message(phone_number, message)
+        
+        elif buyer_id.startswith("ig_"):
+            platform = "instagram"
+            instagram_user_id = buyer_id[3:]
+            
+            # Get Instagram API
+            from integrations.secrets_helper import get_meta_secrets
+            meta_secrets = get_meta_secrets(ceo_id)
+            instagram_token = meta_secrets.get("INSTAGRAM_ACCESS_TOKEN")
+            instagram_page_id = meta_secrets.get("INSTAGRAM_PAGE_ID")
+            
+            if instagram_token and instagram_page_id:
+                from integrations.instagram_api import InstagramAPI
+                instagram = InstagramAPI(instagram_token, instagram_page_id)
+                await instagram.send_message(instagram_user_id, message)
+        
+        else:
+            raise ValueError(f"Invalid buyer_id format: {buyer_id}")
+        
+        logger.info(f"PDF confirmation sent to {buyer_id} for order {order_id}")
+        
+        return {
+            "status": "sent",
+            "buyer_id": buyer_id,
+            "order_id": order_id,
+            "platform": platform
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to send PDF confirmation: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e)
         }
 
 

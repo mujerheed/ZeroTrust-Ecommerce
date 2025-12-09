@@ -346,8 +346,24 @@ def verify_otp_code(user_id: str, otp: str) -> str:
     """
     Verify OTP and return a JWT if successful.
     """
+    # Verify OTP
     result = verify_otp(user_id, otp)
     if not result.get("valid"):
+        # Publish CloudWatch metric for OTP failure
+        try:
+            import boto3
+            cloudwatch = boto3.client('cloudwatch')
+            cloudwatch.put_metric_data(
+                Namespace='TrustGuard/Auth',
+                MetricData=[{
+                    'MetricName': 'OTPVerificationFailures',
+                    'Value': 1,
+                    'Unit': 'Count'
+                }]
+            )
+        except Exception as e:
+            logger.warning(f"Failed to publish OTP failure metric: {str(e)}")
+        
         raise Exception("Invalid or expired OTP")
     return create_jwt(user_id, result["role"])
 

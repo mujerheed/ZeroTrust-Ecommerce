@@ -78,6 +78,11 @@ async def whatsapp_webhook_receive(request: Request):
     Returns:
         200 OK to acknowledge receipt (Meta expects this within 20 seconds)
     """
+    # VISIBLE CONSOLE LOGGING
+    print("\n" + "="*80)
+    print("🔔 WHATSAPP WEBHOOK RECEIVED!")
+    print("="*80 + "\n")
+    
     try:
         # 1. IP Allowlisting (optional but recommended for production)
         from .ip_allowlist import get_client_ip, is_ip_allowed
@@ -191,6 +196,11 @@ async def instagram_webhook_receive(request: Request):
     Returns:
         200 OK to acknowledge receipt (Meta expects this within 20 seconds)
     """
+    # VISIBLE CONSOLE LOGGING
+    print("\n" + "="*80)
+    print("📸 INSTAGRAM WEBHOOK RECEIVED!")
+    print("="*80 + "\n")
+    
     try:
         # Get Meta App Secret for signature verification
         secrets = await get_meta_secrets()

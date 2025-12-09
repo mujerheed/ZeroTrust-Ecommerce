@@ -1293,6 +1293,18 @@ def approve_escalation_with_otp(
         }
     )
     
+    # Generate and send PDF confirmation
+    try:
+        import asyncio
+        from order_service.pdf_uploader import generate_and_send_pdf
+        
+        # Run PDF generation asynchronously
+        asyncio.create_task(generate_and_send_pdf(escalation['order_id']))
+        logger.info(f"PDF generation initiated for order {escalation['order_id']}")
+    except Exception as e:
+        logger.error(f"Failed to initiate PDF generation: {str(e)}")
+        # Don't fail the approval if PDF generation fails
+    
     return {
         'escalation_id': escalation_id,
         'order_id': escalation['order_id'],

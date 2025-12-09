@@ -21,6 +21,11 @@ Parameters:
     Type: String
     Default: trustguard-receipts
     Description: Prefix for S3 receipt bucket name
+  
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Email address for CloudWatch alarm notifications (leave empty to skip)
 
 # ============================================================
 # GLOBALS: Common configuration for all Lambda functions
@@ -42,6 +47,12 @@ Globals:
     # Disable AWS_IAM authorization - we handle JWT authentication in Lambda
     Auth:
       DefaultAuthorizer: NONE
+
+# ============================================================
+# CONDITIONS: Conditional resource creation
+# ============================================================
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
 
 # ============================================================
 # RESOURCES: Infrastructure components
@@ -469,14 +480,120 @@ Resources:
               Bool:
                 "aws:SecureTransport": "false"
 
-  # ========== SNS TOPICS ==========
-  # SNS Topic for CEO escalation alerts (SMS + Email)
   EscalationAlertTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub "TrustGuard-EscalationAlert-${Environment}"
       DisplayName: TrustGuard High-Value Transaction Alerts
       KmsMasterKeyId: !Ref TrustGuardKMSKey
+
+  # SNS Topic for CloudWatch Alarms
+  MonitoringAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "TrustGuard-Monitoring-${Environment}"
+      DisplayName: TrustGuard Production Monitoring Alerts
+      Subscription:
+        - !If
+          - HasAlertEmail
+          - Endpoint: !Ref AlertEmail
+            Protocol: email
+          - !Ref AWS::NoValue
+
+  # ========== CLOUDWATCH ALARMS ==========
+  
+  # Alarm 1: High Error Rate across all Lambda functions
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlertEmail
+    Properties:
+      AlarmName: !Sub "TrustGuard-HighErrorRate-${Environment}"
+      AlarmDescription: Alert when Lambda error rate exceeds threshold
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300  # 5 minutes
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref MonitoringAlertTopic
+
+  # Alarm 2: OTP Verification Failures (potential attack)
+  OTPFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlertEmail
+    Properties:
+      AlarmName: !Sub "TrustGuard-OTPFailures-${Environment}"
+      AlarmDescription: Alert when OTP verification failures spike
+      MetricName: OTPVerificationFailures
+      Namespace: TrustGuard/Auth
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref MonitoringAlertTopic
+
+  # Alarm 3: Lambda Function Throttling
+  LambdaThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlertEmail
+    Properties:
+      AlarmName: !Sub "TrustGuard-LambdaThrottle-${Environment}"
+      AlarmDescription: Alert when Lambda functions are being throttled
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref MonitoringAlertTopic
+
+  # Alarm 4: API Gateway 5xx Errors
+  APIGateway5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlertEmail
+    Properties:
+      AlarmName: !Sub "TrustGuard-API5xxErrors-${Environment}"
+      AlarmDescription: Alert when API Gateway returns 5xx errors
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref ServerlessRestApi
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref MonitoringAlertTopic
+
+  # Alarm 5: DynamoDB Throttling
+  DynamoDBThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlertEmail
+    Properties:
+      AlarmName: !Sub "TrustGuard-DynamoDBThrottle-${Environment}"
+      AlarmDescription: Alert when DynamoDB requests are being throttled
+      MetricName: UserErrors
+      Namespace: AWS/DynamoDB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref MonitoringAlertTopic
 
   # ========== IAM ROLE (Least Privilege) ==========
   LambdaExecutionRole:
@@ -565,6 +682,15 @@ Resources:
                 Action:
                   - sns:Publish
                 Resource: !Ref EscalationAlertTopic
+        
+        - PolicyName: CloudWatchMetrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
 
   # ========== LAMBDA FUNCTIONS ==========
   
@@ -723,6 +849,46 @@ Resources:
             Method: ANY
             Auth:
               Authorizer: NONE
+
+  # TokenRefreshFunction: Scheduled Meta OAuth token refresh
+  TokenRefreshFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "TrustGuard-TokenRefresh-${Environment}"
+      CodeUri: ../../backend/
+      Handler: integrations.token_refresh.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300  # 5 minutes for multiple CEOs
+      Environment:
+        Variables:
+          USERS_TABLE: !Ref TrustGuardUsersTable
+          META_SECRET_NAME: !Sub "/TrustGuard/${Environment}/meta-${AWS::StackName}"
+          MONITORING_ALERT_TOPIC_ARN: !Ref MonitoringAlertTopic
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: "cron(0 2 * * ? *)"  # 2 AM UTC daily
+            Description: Daily Meta OAuth token refresh check
+            Enabled: true
+
+  # CloudWatch Alarm: Token Expiry Warning
+  TokenExpiryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlertEmail
+    Properties:
+      AlarmName: !Sub "TrustGuard-TokenExpiry-${Environment}"
+      AlarmDescription: Alert when Meta OAuth tokens are expiring soon
+      MetricName: DaysUntilTokenExpiry
+      Namespace: TrustGuard/Tokens
+      Statistic: Minimum
+      Period: 86400  # 1 day
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref MonitoringAlertTopic
 
 # ============================================================
 # OUTPUTS: Key infrastructure details
